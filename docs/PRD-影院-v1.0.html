@@ -1,0 +1,1294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>影院（Cinema）产品需求文档 PRD v1.1</title>
+<style>
+  :root{
+    --bg:#0d1017;
+    --bg-soft:#141924;
+    --bg-card:#1a2130;
+    --line:#252d3d;
+    --line-soft:#1e2534;
+    --txt:#e6e9f0;
+    --txt-dim:#9aa3b5;
+    --txt-faint:#6c7688;
+    --gold:#e0a94b;
+    --gold-soft:rgba(224,169,75,.14);
+    --red:#d9584a;
+    --blue:#4a90d9;
+    --green:#4cb782;
+    --violet:#8f7ae0;
+    --radius:10px;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--txt);
+    font-family:var(--sans);font-size:15px;line-height:1.75;
+    -webkit-font-smoothing:antialiased;
+  }
+  .layout{display:grid;grid-template-columns:264px minmax(0,1fr);max-width:1560px;margin:0 auto}
+  /* ---------- sidebar ---------- */
+  .sidebar{
+    position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+    border-right:1px solid var(--line-soft);padding:26px 18px 40px;background:var(--bg);
+  }
+  .brand{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+  .brand-mark{
+    width:30px;height:30px;border-radius:8px;flex:none;
+    background:linear-gradient(135deg,var(--gold),var(--red));
+    display:grid;place-items:center;font-weight:800;color:#120d05;font-size:14px;
+  }
+  .brand-name{font-weight:700;letter-spacing:.5px}
+  .brand-sub{font-size:11.5px;color:var(--txt-faint);margin:0 0 20px 40px;font-family:var(--mono)}
+  .nav-group{font-size:11px;color:var(--txt-faint);letter-spacing:1.4px;text-transform:uppercase;margin:20px 0 8px;padding-left:8px}
+  .nav a{
+    display:block;color:var(--txt-dim);text-decoration:none;font-size:13.5px;
+    padding:6px 10px;border-radius:7px;border-left:2px solid transparent;transition:.15s;
+  }
+  .nav a:hover{background:var(--bg-soft);color:var(--txt)}
+  .nav a.active{color:var(--gold);background:var(--gold-soft);border-left-color:var(--gold)}
+  /* ---------- main ---------- */
+  main{padding:44px 46px 120px;min-width:0}
+  .doc-head{border-bottom:1px solid var(--line);padding-bottom:26px;margin-bottom:34px}
+  .kicker{font-family:var(--mono);font-size:12px;color:var(--gold);letter-spacing:2px;text-transform:uppercase}
+  h1{font-size:31px;line-height:1.3;margin:10px 0 14px;font-weight:700;letter-spacing:.4px}
+  .meta-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .chip{
+    font-size:12px;font-family:var(--mono);color:var(--txt-dim);
+    border:1px solid var(--line);border-radius:999px;padding:3px 11px;background:var(--bg-soft);
+  }
+  .chip b{color:var(--txt);font-weight:600}
+  section{margin-bottom:52px;scroll-margin-top:20px}
+  h2{
+    font-size:20px;margin:0 0 6px;font-weight:700;padding-bottom:12px;
+    border-bottom:1px solid var(--line-soft);display:flex;align-items:baseline;gap:10px;
+  }
+  h2 .num{font-family:var(--mono);color:var(--gold);font-size:14px;font-weight:600}
+  h3{font-size:16px;margin:32px 0 10px;font-weight:700;color:#f2f4f9}
+  h3 .rid{
+    font-family:var(--mono);font-size:11.5px;color:var(--gold);
+    border:1px solid rgba(224,169,75,.35);background:var(--gold-soft);
+    border-radius:5px;padding:1.5px 7px;margin-right:9px;vertical-align:1.5px;font-weight:600;
+  }
+  h4{font-size:13.5px;margin:20px 0 6px;font-weight:700;color:var(--txt-dim);letter-spacing:.4px}
+  p{margin:9px 0}
+  ul,ol{margin:9px 0;padding-left:22px}
+  li{margin:5px 0}
+  code{
+    font-family:var(--mono);font-size:12.5px;background:var(--bg-soft);
+    border:1px solid var(--line-soft);border-radius:4px;padding:1px 5px;color:#cfd6e4;
+  }
+  .tbd{color:var(--red);font-family:var(--mono);font-size:12px;font-weight:600}
+  .asm{color:var(--violet);font-family:var(--mono);font-size:12px;font-weight:600}
+  /* ---------- tables ---------- */
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+  thead th{background:var(--bg-soft);color:var(--txt-dim);font-size:12px;letter-spacing:.6px;text-transform:uppercase;font-weight:600;border-bottom:1px solid var(--line)}
+  tbody tr:hover{background:rgba(255,255,255,.018)}
+  td code{white-space:nowrap}
+  /* ---------- cards / callouts ---------- */
+  .card{background:var(--bg-card);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;margin:14px 0}
+  .callout{border-left:3px solid var(--gold);background:var(--bg-soft);padding:12px 16px;border-radius:0 8px 8px 0;margin:14px 0;font-size:13.5px}
+  .callout.warn{border-left-color:var(--red)}
+  .callout.assume{border-left-color:var(--violet)}
+  .callout .ct{font-weight:700;font-size:12.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--gold);display:block;margin-bottom:4px}
+  .callout.warn .ct{color:var(--red)}
+  .callout.assume .ct{color:var(--violet)}
+  .callout.ok{border-left-color:var(--green)}
+  .callout.ok .ct{color:var(--green)}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+  .kv{font-size:13.5px}
+  .kv div{display:flex;gap:10px;padding:6px 0;border-bottom:1px dashed var(--line-soft)}
+  .kv div:last-child{border-bottom:0}
+  .kv b{flex:none;width:112px;color:var(--txt-dim);font-weight:600}
+  .flow{
+    display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:16px 0;
+    font-size:12.5px;font-family:var(--mono);
+  }
+  .flow span{border:1px solid var(--line);background:var(--bg-soft);border-radius:7px;padding:5px 11px;color:var(--txt-dim)}
+  .flow i{color:var(--gold);font-style:normal}
+  .flow span.hot{border-color:rgba(224,169,75,.5);color:var(--gold);background:var(--gold-soft)}
+  /* ---------- interactive demo ---------- */
+  .demo{border:1px solid var(--line);border-radius:12px;background:#0a0d13;overflow:hidden;margin:18px 0}
+  .demo-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:11px 15px;background:var(--bg-card);border-bottom:1px solid var(--line)}
+  .demo-tag{font-family:var(--mono);font-size:11px;color:var(--gold);border:1px solid rgba(224,169,75,.35);border-radius:4px;padding:1px 6px;background:var(--gold-soft)}
+  .demo-title{font-size:13.5px;font-weight:700}
+  .demo-hint{font-size:11.5px;color:var(--txt-faint);margin-left:auto;font-family:var(--mono)}
+  .demo-body{padding:15px}
+  .demo-status{font-size:12px;color:var(--txt-faint);font-family:var(--mono);padding:9px 15px;border-top:1px solid var(--line-soft);background:#090b10}
+  .btn{
+    font-family:var(--sans);font-size:12.5px;color:var(--txt);cursor:pointer;
+    background:var(--bg-card);border:1px solid var(--line);border-radius:7px;padding:5px 12px;transition:.15s;
+  }
+  .btn:hover{border-color:var(--gold);color:var(--gold)}
+  .btn.on{background:var(--gold);border-color:var(--gold);color:#1a1305;font-weight:700}
+  .btn.sm{font-size:11.5px;padding:3px 9px}
+  .filters{display:flex;flex-wrap:wrap;gap:16px;margin-bottom:16px}
+  .fgroup{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .flabel{font-size:11px;color:var(--txt-faint);font-family:var(--mono);letter-spacing:1px}
+  .tagbtn{
+    font-size:11.5px;padding:3px 10px;border-radius:999px;cursor:pointer;
+    border:1px solid var(--line);background:var(--bg-soft);color:var(--txt-dim);transition:.15s;
+  }
+  .tagbtn:hover{color:var(--txt);border-color:#3a465c}
+  .tagbtn.on{background:var(--gold-soft);border-color:var(--gold);color:var(--gold);font-weight:600}
+  .poster-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:12px}
+  .poster{
+    position:relative;border-radius:9px;overflow:hidden;cursor:pointer;
+    aspect-ratio:2/3;background:#1b2230;border:1px solid var(--line);
+  }
+  .poster img{width:100%;height:100%;object-fit:cover;display:block;transition:.25s}
+  .poster:hover img{transform:scale(1.05)}
+  .poster .noart{
+    width:100%;height:100%;display:grid;place-items:center;text-align:center;padding:10px;
+    background:linear-gradient(150deg,#232c3d,#141a25);
+  }
+  .poster .noart b{font-size:13px;display:block;color:#c9d1de}
+  .poster .noart em{font-style:normal;font-size:10px;color:var(--txt-faint);font-family:var(--mono)}
+  .badge{
+    position:absolute;left:7px;top:7px;font-size:10px;font-family:var(--mono);
+    background:rgba(10,13,19,.82);border:1px solid var(--line);border-radius:5px;padding:1.5px 6px;color:var(--gold);
+  }
+  .badge.sub{left:auto;right:7px;color:var(--blue);border-color:rgba(74,144,217,.4)}
+  .overlay{
+    position:absolute;inset:auto 0 0 0;padding:10px 10px 12px;
+    background:linear-gradient(to top,rgba(6,8,12,.97) 62%,rgba(6,8,12,0));
+    opacity:0;transform:translateY(8px);transition:.22s;pointer-events:none;
+  }
+  .poster:hover .overlay{opacity:1;transform:translateY(0);pointer-events:auto;transition-delay:.28s}
+  .overlay .ot{font-size:12.5px;font-weight:700;line-height:1.35}
+  .overlay .om{font-size:10.5px;color:var(--txt-dim);font-family:var(--mono);margin:2px 0 5px}
+  .overlay .tags{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px}
+  .overlay .tags span{font-size:9.5px;border:1px solid var(--line);border-radius:4px;padding:0 5px;color:var(--txt-dim)}
+  .overlay .acts{display:flex;gap:6px}
+  .overlay .acts button{font-size:10.5px;padding:3px 9px}
+  .overlay .pvnote{
+    display:none;font-size:9.5px;line-height:1.45;color:var(--gold);
+    border:1px dashed rgba(224,169,75,.45);border-radius:5px;padding:3px 6px;margin-bottom:6px;
+  }
+  /* ---------- 悬停自动预览精华片段 ---------- */
+  .previewctl{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:14px}
+  .poster .pv{
+    position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:6px;padding:32px 9px 7px;
+    background:linear-gradient(to bottom,rgba(6,8,12,.85) 0,rgba(6,8,12,.55) 46%,rgba(6,8,12,0) 100%);
+    opacity:0;transition:.2s .28s;pointer-events:none;
+  }
+  .poster.previewing .pv{opacity:1}
+  .pv .live{font-size:9.5px;font-family:var(--mono);color:var(--red);border:1px solid rgba(217,88,74,.5);border-radius:4px;padding:0 5px;background:rgba(217,88,74,.12)}
+  .pv .mute{font-size:9.5px;font-family:var(--mono);color:var(--txt-dim);border:1px solid var(--line);border-radius:4px;padding:0 5px}
+  .pv .tcode{font-size:9.5px;font-family:var(--mono);color:var(--gold);margin-left:auto}
+  .poster .pvbar{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.14);opacity:0;transition:.2s .28s}
+  .poster.previewing .pvbar{opacity:1}
+  .poster .pvbar i{display:block;height:100%;width:0;background:var(--gold);transition:width .24s linear}
+  .poster.previewing img{animation:kenburns 14s ease-out forwards}
+  @keyframes kenburns{from{transform:scale(1.05)}to{transform:scale(1.24) translate(-2%,-3%)}}
+  /* multi-screen demo */
+  .layoutbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+  .stage{display:grid;gap:8px;aspect-ratio:16/9;background:#05070b;border:1px solid var(--line);border-radius:9px;padding:8px}
+  .tile{
+    position:relative;border-radius:7px;overflow:hidden;background:#12161f;
+    border:1px solid var(--line);display:grid;place-items:center;
+  }
+  .tile img{width:100%;height:100%;object-fit:cover;opacity:.88}
+  .tile.main{border-color:var(--gold);box-shadow:0 0 0 2px var(--gold-soft)}
+  .tile .tlabel{
+    position:absolute;left:7px;bottom:7px;font-size:10.5px;font-family:var(--mono);
+    background:rgba(8,10,15,.8);border:1px solid var(--line);border-radius:5px;padding:2px 7px;
+  }
+  .tile .sound{
+    position:absolute;right:7px;top:7px;font-size:10.5px;font-family:var(--mono);cursor:pointer;
+    background:rgba(8,10,15,.8);border:1px solid var(--line);border-radius:5px;padding:2px 7px;color:var(--txt-dim);
+  }
+  .tile .sound.on{border-color:var(--gold);color:var(--gold);background:var(--gold-soft)}
+  .tile .err{
+    position:absolute;inset:0;display:grid;place-items:center;text-align:center;
+    background:rgba(6,8,12,.9);font-size:11.5px;color:var(--red);padding:10px;font-family:var(--mono);
+  }
+  /* subtitle demo */
+  .player-frame{position:relative;aspect-ratio:16/9;background:#05070b;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+  .player-frame img{width:100%;height:100%;object-fit:cover;filter:brightness(.72)}
+  .sub-overlay{
+    position:absolute;left:0;right:0;bottom:38px;text-align:center;padding:0 8%;
+  }
+  .sub-overlay .src{font-size:12px;color:#cdd5e2;text-shadow:0 2px 6px #000;margin-bottom:3px}
+  .sub-overlay .dst{
+    display:inline-block;font-size:15px;font-weight:700;background:rgba(0,0,0,.62);
+    padding:3px 10px;border-radius:4px;text-shadow:0 1px 3px #000;
+  }
+  .subctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+  .statebar{display:flex;flex-wrap:wrap;gap:6px;margin-top:14px}
+  .statebar span{font-size:11px;font-family:var(--mono);padding:3px 9px;border-radius:5px;border:1px solid var(--line);color:var(--txt-faint)}
+  .statebar span.on{color:var(--gold);border-color:var(--gold);background:var(--gold-soft)}
+  .statebar span.fail{color:var(--red);border-color:rgba(217,88,74,.45)}
+  /* misc */
+  .pill{display:inline-block;font-size:11.5px;font-family:var(--mono);border-radius:5px;padding:1.5px 7px;border:1px solid var(--line);color:var(--txt-dim)}
+  .pill.p0{color:var(--gold);border-color:rgba(224,169,75,.4);background:var(--gold-soft)}
+  .pill.p1{color:var(--blue);border-color:rgba(74,144,217,.35)}
+  .pill.out{color:var(--txt-faint)}
+  .q{counter-reset:qq}
+  .q .item{border:1px solid var(--line);border-radius:10px;padding:14px 17px;margin:12px 0;background:var(--bg-card)}
+  .q .item h4{margin:0 0 6px;font-size:14px;color:var(--txt)}
+  .q .item .why{font-size:12.5px;color:var(--txt-faint)}
+  .q .item .why b{color:var(--red)}
+  footer{border-top:1px solid var(--line);padding-top:18px;font-size:12.5px;color:var(--txt-faint);font-family:var(--mono)}
+  @media (max-width:1000px){
+    .layout{grid-template-columns:1fr}
+    .sidebar{position:relative;height:auto;border-right:0;border-bottom:1px solid var(--line-soft)}
+    main{padding:28px 20px 80px}
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">影</div>
+      <div class="brand-name">影院 Cinema</div>
+    </div>
+    <div class="brand-sub">PRD v1.1 · 2026-10-16</div>
+    <nav class="nav" id="nav">
+      <div class="nav-group">概述</div>
+      <a href="#s1">1 · 背景与目标</a>
+      <a href="#s2">2 · 范围与 P0 旅程</a>
+      <a href="#s3">3 · 角色与对象模型</a>
+      <div class="nav-group">功能需求</div>
+      <a href="#fr-01">FR-01 媒体源与入库</a>
+      <a href="#fr-02">FR-02 影片库与海报墙</a>
+      <a href="#fr-03">FR-03 标签与检索</a>
+      <a href="#fr-04">FR-04 播放器与续播</a>
+      <a href="#fr-05">FR-05 实时字幕</a>
+      <a href="#fr-06">FR-06 多视频同时播放</a>
+      <a href="#fr-07">FR-07 可迭代性要求</a>
+      <div class="nav-group">规则与决策</div>
+      <a href="#s4">4 · 共享规则与异常</a>
+      <a href="#s5">5 · 开放问题</a>
+      <a href="#s6">6 · 变更记录</a>
+    </nav>
+  </aside>
+
+  <main>
+    <div class="doc-head">
+      <div class="kicker">Product Requirements Document</div>
+      <h1>影院（Cinema）— 本地与在线视频统一观看、标签检索、实时字幕与多屏播放</h1>
+      <p style="color:var(--txt-dim);margin:0">
+        单一应用内完成「找片 → 浏览 → 播放 → 看懂」的完整闭环，覆盖本地文件与在线地址两类片源。
+        本文档定义产品行为与业务决策，不含技术实现方案。
+      </p>
+      <div class="meta-chips">
+        <span class="chip">版本 <b>v1.1</b></span>
+        <span class="chip">状态 <b>待评审</b></span>
+        <span class="chip">范围 <b>新产品的首个完整旅程</b></span>
+        <span class="chip">结构 <b>按模块的功能需求</b></span>
+        <span class="chip">标记 <span class="tbd">[TBD]</span> 待定 · <span class="asm">[假设]</span> 推断</span>
+      </div>
+    </div>
+
+    <!-- ================= 1 ================= -->
+    <section id="s1">
+      <h2><span class="num">01</span>背景与目标</h2>
+      <p>
+        用户手上的视频分散在两类地方：本机硬盘上按文件夹堆放的文件，以及需要网络访问的在线地址。
+        这两类内容目前各自独立：本地文件靠文件管理器翻找，只能看文件名，无法按内容检索；在线地址靠浏览器书签或播放器历史记录，
+        无法标记与分类。结果是同一个「今晚看什么」的动作被拆到两三个工具里，且每次都要重新定位文件位置。
+      </p>
+      <p>
+        第二类问题出现在内容本身：外文影片如果没有内嵌或外挂字幕，用户就完全看不懂；而临时去找字幕文件经常对不上版本或时间轴。
+        第三类是观看形态，用户存在同时看多路视频的需求（对比观看、家庭分屏、多个直播/录像同时跑），
+        但现有播放器一次只能承载一路画面。
+      </p>
+      <div class="card">
+        <h4 style="margin-top:0">产品响应与可观察结果</h4>
+        <div class="flow">
+          <span>片源分散在硬盘与网络</span><i>→</i>
+          <span class="hot">统一媒体源 + 一次入库</span><i>→</i>
+          <span>影片条目与海报墙</span><i>→</i>
+          <span class="hot">标签筛选 + 搜索</span><i>→</i>
+          <span>点击海报直接播放</span><i>→</i>
+          <span class="hot">无字幕外文视频开启实时字幕</span><i>→</i>
+          <span>可同时播放多路</span>
+        </div>
+        <div class="kv">
+          <div><b>可观察结果 1</b><span>用户不需要打开文件管理器或浏览器，在应用内即可定位到任意一部影片并播放。</span></div>
+          <div><b>可观察结果 2</b><span>用户通过点击标签（含多标签组合）能把影片数量从全库收敛到可一眼浏览的范围。</span></div>
+          <div><b>可观察结果 3</b><span>对没有字幕的外文视频，用户开启实时字幕后可立即看到随语音同步出现的目标语言字幕，无需先去外部寻找字幕文件。</span></div>
+          <div><b>可观察结果 4</b><span>用户可在同一屏同时播放 2 路以上视频，并能指定哪一路出声，互不干扰。</span></div>
+        </div>
+        <p style="margin-bottom:0;font-size:13px;color:var(--txt-faint)">
+          说明：本文档不设定量化指标，因为尚未有可支撑的基线数据。
+        </p>
+      </div>
+    </section>
+
+    <!-- ================= 2 ================= -->
+    <section id="s2">
+      <h2><span class="num">02</span>范围与 P0 旅程</h2>
+
+      <h3>产品形态判定</h3>
+      <div class="callout assume">
+        <span class="ct">产品判断 [假设, TBD]</span>
+        影院定位为<b>桌面客户端</b>（首发以 Windows 为优先平台 <span class="tbd">[TBD]</span>）。
+        依据：需求 1 要求直接使用本机文件与在线地址，需要访问本地目录与文件系统；需求 2 的实时字幕在播放过程中持续产生识别负载，
+        放在本机的算力与隐私成本最低。电视大屏、移动端与投屏作为后续形态预留 <span class="tbd">[TBD]</span>，不进入 P0。
+        该判定直接影响全部界面与交互设计，需在评审时优先确认。
+      </div>
+
+      <h3>入口条件</h3>
+      <ul>
+        <li>用户已安装影院客户端，机器上存在至少一个包含视频文件的本地目录，或至少一个可访问的在线视频地址。</li>
+      </ul>
+
+      <h3>P0 最小完整旅程</h3>
+      <div class="flow">
+        <span>首次启动</span><i>→</i>
+        <span class="hot">添加媒体源</span><i>→</i>
+        <span>扫描入库</span><i>→</i>
+        <span>自动抓取元数据与海报</span><i>→</i>
+        <span class="hot">海报墙浏览（悬停自动预览精华片段）</span><i>→</i>
+        <span class="hot">按标签筛选 / 搜索</span><i>→</i>
+        <span>点击海报播放</span><i>→</i>
+        <span class="hot">无字幕外文视频开启实时字幕</span><i>→</i>
+        <span>多屏模式同时推入第 2 路</span><i>→</i>
+        <span>退出播放，进度已记忆</span>
+      </div>
+
+      <table>
+        <thead><tr><th style="width:88px">层级</th><th>能力</th><th>在旅程中的作用</th></tr></thead>
+        <tbody>
+          <tr><td><span class="pill p0">P0</span></td><td>媒体源添加与扫描入库（FR-01）</td><td>旅程起点，没有入库就没有一切</td></tr>
+          <tr><td><span class="pill p0">P0</span></td><td>影片条目、元数据与海报墙（FR-02）</td><td>承载浏览，以及需求 3 的「悬停自动播放精华片段」</td></tr>
+          <tr><td><span class="pill p0">P0</span></td><td>标签体系与组合检索（FR-03）</td><td>解决需求 1 的「通过标签找到电影」</td></tr>
+          <tr><td><span class="pill p0">P0</span></td><td>播放器与进度记忆（FR-04）</td><td>完成观看动作</td></tr>
+          <tr><td><span class="pill p0">P0</span></td><td>实时字幕（FR-05）</td><td>解决需求 2 的「无字幕外文视频」</td></tr>
+          <tr><td><span class="pill p0">P0</span></td><td>多视频同时播放（FR-06）</td><td>解决需求 4 的多路观看</td></tr>
+          <tr><td><span class="pill p0">P0</span></td><td>可迭代性要求（FR-07）</td><td>解决需求 5，约束上述模块的扩展方式</td></tr>
+          <tr><td><span class="pill out">不在 P0</span></td><td>账号体系、多设备共享同一片库、付费分发、直播电视、商业 DRM 内容、社交分享</td><td>与单机观看闭环无关，纳入会让首个旅程无法收敛</td></tr>
+        </tbody>
+      </table>
+
+      <h3>失败恢复路径（P0 必须覆盖）</h3>
+      <table>
+        <thead><tr><th style="width:190px">失败</th><th>恢复方式</th><th>用户可见结果</th></tr></thead>
+        <tbody>
+          <tr><td>元数据/海报抓取失败</td><td>条目进入「元数据待补全」，提供手动匹配与手动上传海报</td><td>海报墙显示占位海报（文件名 + 渐变底色），条目仍可正常播放</td></tr>
+          <tr><td>实时字幕引擎不可用</td><td>降级为：加载外挂字幕文件 / 仅显示原文识别 / 关闭实时字幕</td><td>明确提示原因，播放不中断</td></tr>
+          <tr><td>多屏播放超出设备能力</td><td>拒绝新增路数并提示可调上限，保留已播放路数</td><td>提示「已到同时播放上限」，其他窗口不受影响</td></tr>
+          <tr><td>悬停预览不可用（多屏额度不足 / 无精华片段 / 已关闭）</td><td>只显示信息层，在浮层标注不可用原因；不重试、不抢占正在播放的窗口</td><td>浏览与筛选不受影响，用户可见明确的降级说明</td></tr>
+          <tr><td>源文件被移动或删除</td><td>条目标记「文件缺失」，提供「定位文件」与「忽略」</td><td>条目在库中保留但置灰，不进入播放</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ================= 3 ================= -->
+    <section id="s3">
+      <h2><span class="num">03</span>角色与对象模型</h2>
+      <h3>角色</h3>
+      <table>
+        <thead><tr><th style="width:150px">角色</th><th>权限范围</th><th>P0 / P1</th></tr></thead>
+        <tbody>
+          <tr><td>影库主人（本机用户）</td><td>添加/移除媒体源，编辑标签与元数据，开启实时字幕，调整多屏上限与隐私设置</td><td><span class="pill p0">P0</span></td></tr>
+          <tr><td>观看者（家庭共用同一台设备）</td><td>浏览、筛选、播放、开启实时字幕；不能移除媒体源、不能修改隐私设置</td><td><span class="pill p0">P0</span>（同一设备的多用户切换机制 <span class="tbd">[TBD]</span>）</td></tr>
+          <tr><td>受限观看者（儿童）</td><td>在家长模式下按标签/评分限制可见范围</td><td><span class="pill p1">P1</span></td></tr>
+        </tbody>
+      </table>
+      <div class="callout">
+        <span class="ct">说明</span>
+        P0 不引入账号与登录。区分角色的目的是让「谁可以修改影库」与「谁在受影响时能被追溯」有明确边界；多设备共享片库不在范围内。
+      </div>
+
+      <h3>核心对象</h3>
+      <table>
+        <thead><tr><th style="width:130px">对象</th><th>定义</th><th>关键属性</th></tr></thead>
+        <tbody>
+          <tr><td>媒体源</td><td>一个可被扫描的位置，本地目录或在线地址集合</td><td>类型、路径/地址、扫描状态、最近扫描时间、包含条目数</td></tr>
+          <tr><td>影片条目</td><td>库中的最小可播放单位，对应一个视频文件或一个在线视频</td><td>标题、年份、时长、海报、评分、清晰度、来源、文件路径、识别状态</td></tr>
+          <tr><td>标签</td><td>用于检索影片的分类词，分为系统维度标签与用户自定义标签</td><td>名称、所属维度、来源（用户/元数据源/自动推导）、是否锁定</td></tr>
+          <tr><td>字幕轨道</td><td>一条可被播放器加载的字幕数据，不含来源差异</td><td>语种、来源类型（外挂/内嵌/实时生成）、锁定状态、生成时间</td></tr>
+          <tr><td>播放会话</td><td>一次实际播放过程，承载进度、音轨、字幕选择</td><td>关联条目、播放位置、播放状态、所在屏位（多屏时）；悬停预览不构成播放会话，不写进度（见第 11 节）</td></tr>
+          <tr><td>收藏夹</td><td>用户主动聚合的影片集合</td><td>名称、包含条目、排序方式</td></tr>
+        </tbody>
+      </table>
+
+      <h3>关键状态机</h3>
+      <div class="grid2">
+        <div class="card">
+          <h4 style="margin-top:0">媒体源</h4>
+          <div class="flow"><span>已添加</span><i>→</i><span>扫描中</span><i>→</i><span class="hot">已就绪</span><i>|</i><span>扫描失败</span><i>|</i><span>已移除</span></div>
+        </div>
+        <div class="card">
+          <h4 style="margin-top:0">影片条目</h4>
+          <div class="flow"><span>待识别</span><i>→</i><span class="hot">已识别</span><i>|</i><span>元数据待补全</span><i>|</i><span>文件缺失</span><i>|</i><span>已隐藏</span></div>
+        </div>
+        <div class="card">
+          <h4 style="margin-top:0">实时字幕会话</h4>
+          <div class="flow"><span>未开启</span><i>→</i><span>初始化</span><i>→</i><span class="hot">运行中</span><i>↔</i><span>已暂停</span><i>→</i><span>已保存为轨道</span><i>|</i><span style="color:var(--red);border-color:rgba(217,88,74,.45)">失败</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= FR-01 ================= -->
+    <section id="fr-01">
+      <h2><span class="num">04</span>功能需求</h2>
+      <h3><span class="rid">FR-01</span>媒体源与入库</h3>
+      <p><b>目的：</b>让本地文件与在线地址进入同一个可检索的库，并为后续所有模块提供统一的条目数据。</p>
+      <h4>布局与入口</h4>
+      <p>主界面左侧为导航区，其中「媒体源」页列出全部已添加的源，并常驻「添加媒体源」入口。首次启动且库为空时，主区域直接展示添加引导，而不是空白海报墙。</p>
+      <h4>处理规则</h4>
+      <ul>
+        <li><b>源类型：</b>本地文件夹、网络位置（局域网共享路径）、在线地址（单个视频直链）。P1 再扩展网盘与订阅型在线源。<span class="tbd">[TBD]</span> 在线资源的具体边界见开放问题 Q2。</li>
+        <li><b>扫描：</b>添加后立即执行一次全量扫描；之后按可配置的触发方式重扫（手动触发为 P0，定时触发为 P1）。</li>
+        <li><b>识别：</b>从文件名与所在文件夹路径解析标题与年份，作为元数据抓取的输入；解析失败时不阻塞入库，条目进入「元数据待补全」。</li>
+        <li><b>去重：</b>同一物理文件被重复扫描时合并为一条条目，不产生重复海报；同一影片的不同清晰度版本视为<b>不同条目</b>，但互相标记为「另一版本」（便于用户从 A 版本跳转到 B 版本）。</li>
+        <li><b>移除源：</b>移除源时保留该源下条目的用户数据（标签、收藏、观看进度），条目状态转为「文件缺失」；用户可选择「同时删除条目与数据」。该选择为不可逆动作，需二次确认。</li>
+        <li><b>增量：</b>重扫只处理新增、变更与消失的文件，已识别的元数据与用户标签不被覆盖。</li>
+      </ul>
+      <h4>结果与状态变化</h4>
+      <p>扫描完成后，主界面显示新增条目数量；扫描过程中显示进度（已处理 / 总数）并允许取消，取消后已入库的条目保留有效。</p>
+      <h4>字段</h4>
+      <table>
+        <thead><tr><th>字段</th><th>类型/取值</th><th>必填</th><th>可编辑</th><th>校验</th></tr></thead>
+        <tbody>
+          <tr><td>源名称</td><td>文本</td><td>是</td><td>是</td><td>非空；同名时自动追加序号</td></tr>
+          <tr><td>源类型</td><td>本地文件夹 / 网络位置 / 在线地址</td><td>是</td><td>否（需重建）</td><td>—</td></tr>
+          <tr><td>路径或地址</td><td>路径字符串 / URL</td><td>是</td><td>是（触发重扫）</td><td>本地路径必须存在且可读；地址必须可解析</td></tr>
+          <tr><td>扫描排除项</td><td>目录名或通配模式列表</td><td>否</td><td>是</td><td>支持如 <code>sample</code>、<code>trailer</code> 等常见噪音目录</td></tr>
+          <tr><td>自动抓取元数据</td><td>开 / 关</td><td>是</td><td>是</td><td>默认开</td></tr>
+        </tbody>
+      </table>
+      <h4>异常与边界</h4>
+      <table>
+        <thead><tr><th style="width:190px">场景</th><th>系统行为</th></tr></thead>
+        <tbody>
+          <tr><td>路径不可访问（盘符离线、权限不足）</td><td>源状态置为「扫描失败」，保留既有条目并提示原因；恢复后重扫仅补增量</td></tr>
+          <tr><td>在线地址失效（404 / 超时）</td><td>条目标记「地址失效」，海报墙置灰，不进入播放；提供编辑地址入口</td></tr>
+          <tr><td>目录中无可识别视频文件</td><td>提示「未发现可识别的视频文件」，源保留但条目数为 0</td></tr>
+          <tr><td>扫描中途被取消</td><td>已入库条目保留，未处理文件在下次扫描时继续</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ================= FR-02 ================= -->
+    <section id="fr-02">
+      <h2><span class="num">05</span>影片库与海报墙 <span style="font-size:12px;color:var(--txt-faint);font-weight:400;font-family:var(--mono)">FR-02</span></h2>
+      <p>
+        <b>目的：</b>以海报为主要视觉语言呈现影片库，让用户「先看脸再决定看什么」；并实现需求 3 已确认的交互：<b>鼠标移动到海报上自动静音播放该影片的精华片段</b>。
+      </p>
+
+      <div class="callout ok">
+        <span class="ct">需求第 3 条已确认（v1.1）</span>
+        用户明确：<b>鼠标移动到海报上即自动播放该影片的精华片段</b>。因此悬停的主行为是「静音自动预览」，标题/评分/标签等信息层与「播放」「详情」按钮是叠加在预览之上的附属信息，不是悬停的主行为。
+        原始描述「电影有海报，希望通过海报呈现，并且移动到」的中断部分按此落定；原 v1.0 中把预览列为 P1 的判断已作废，预览升级为 P0。
+        拖拽调整海报墙顺序 / 拖入收藏夹仍为 P1。
+      </div>
+
+      <div class="demo" id="demo-poster">
+        <div class="demo-head">
+          <span class="demo-tag">FR-02 · FR-03</span>
+          <span class="demo-title">海报墙 + 标签筛选 + 悬停自动播放精华片段</span>
+          <span class="demo-hint">悬停 300ms 触发 · 演示按 4 倍速推进</span>
+        </div>
+        <div class="demo-body">
+          <div class="filters" id="tagFilters"></div>
+          <div class="previewctl">
+            <button class="btn sm on" id="pvToggle">悬停自动预览：开</button>
+            <button class="btn sm" id="capToggle">模拟多屏已达上限：否</button>
+            <span class="demo-hint" style="margin-left:0">用于演示「过载降级」回退态</span>
+          </div>
+          <div class="poster-grid" id="posterGrid"></div>
+        </div>
+        <div class="demo-status" id="posterStatus">当前筛选：全部影片（8 部）· 悬停任意海报可预览精华片段</div>
+      </div>
+
+      <h4>布局</h4>
+      <ul>
+        <li>主区域为自适应网格海报墙；网格列数随窗口宽度变化，用户可切换海报尺寸（大 / 中 / 小）。</li>
+        <li>顶部为检索区：搜索框 + 已选标签条（显示当前生效的标签，可单个移除或一键清空）。</li>
+        <li>右侧或顶部可切换排序：最近添加、标题、年份、评分、时长、最近观看。</li>
+        <li>未识别出海报的条目使用占位海报：渐变底色 + 文件名首行文字 + 状态说明，不隐藏该条目。</li>
+      </ul>
+
+      <h4>处理规则</h4>
+      <ul>
+        <li><b>海报来源：</b>优先使用用户手动设置的本地海报图；其次使用元数据源返回的海报。质量不足（分辨过低）时标记「海报待优化」并优先匹配更高质量图。</li>
+        <li><b>悬停出发（核心行为）：</b>鼠标移动到海报上停留 300ms 后，海报内开始<b>静音自动播放该影片的精华片段</b>；同时在预览之上叠加信息层：标题、年份与时长、评分、标签（最多展示 4 个）、简介前两行，以及「播放」「详情」两个动作。</li>
+        <li><b>移开：</b>鼠标移开或焦点离开后立即停止预览并复位到静止海报帧；不改变当前筛选状态，不跳转页面。</li>
+        <li><b>点击海报：</b>默认单击进入详情页，详情页以「播放」为主按钮；悬停浮层的「播放」可直接开始播放。单击行为可在设置中切换为「单击即播放」。</li>
+        <li><b>与主播放并行：</b>预览在<b>静音</b>下进行且不改变任何正在播放内容的音频焦点，因此不会打断单路播放，也不会抢走多屏模式下的发声窗口。</li>
+        <li><b>详情页：</b>展示完整海报、简介、标签、可用版本、字幕轨道清单、播放进度，并提供编辑标题/年份/海报、添加标签、加入收藏夹。</li>
+        <li><b>排序与分页：</b>大库（条目数超过一屏）采用滚动加载，滚动到底部继续加载，不出现空页。</li>
+      </ul>
+
+      <h4>精华片段预览规则（悬停自动播放）</h4>
+      <table>
+        <thead><tr><th style="width:150px">项目</th><th>规则</th></tr></thead>
+        <tbody>
+          <tr><td>触发</td><td>悬停停留 <b>300ms</b> 后开始播放；设置中关闭「悬停自动预览」时不播放，只显示信息层</td></tr>
+          <tr><td>片段来源与长度</td><td>取自影片本体，默认抽取连续 <b>30 秒</b> 作为精华片段；起始位置如何判定为「精华」<span class="tbd">[TBD]</span>（不在本文档编造具体算法，需先定基线）</td></tr>
+          <tr><td>音频</td><td>强制静音：不发声、不改变正在播放内容的音频焦点（含多屏的发声窗口）</td></tr>
+          <tr><td>播放实例</td><td>独立播放实例，低优先级；与多屏播放共享同一份解码路数上限</td></tr>
+          <tr><td>进度副作用</td><td>不写入观看进度、不改变「在看 / 已看」状态；移开时未播完的预览直接丢弃</td></tr>
+          <tr><td>并发</td><td>同一时刻只允许 1 路预览；鼠标移到另一张海报时立即终止上一路并从头开始新的</td></tr>
+          <tr><td>重复悬停</td><td>同一海报再次悬停仍从头播放，不记忆上次位置（避免每次停在同一画面）</td></tr>
+          <tr><td>结束</td><td>片段播完停在末帧并显示「预览结束」；鼠标移开后复位到静止海报帧</td></tr>
+          <tr><td>无可用片段</td><td>显示「无预览片段」，只保留信息层；不重试、不阻塞浏览</td></tr>
+          <tr><td>过载降级</td><td>多屏播放已达同时播放上限时，预览被<b>拒绝</b>并在信息层标注原因（可见的降级，不静默失败、不抢占正在播放的窗口）</td></tr>
+          <tr><td>可关闭</td><td>设置中可整体关闭悬停预览，兼顾省电与无障碍需求</td></tr>
+        </tbody>
+      </table>
+
+      <h4>结果与状态变化</h4>
+      <p>悬停与点击均为浏览行为，不产生持久化状态；编辑标题/海报/标签为持久化动作，写入条目并影响筛选结果。编辑后海报墙立即重排或重绘。</p>
+
+      <h4>字段（详情页可编辑项）</h4>
+      <table>
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>校验与规则</th></tr></thead>
+        <tbody>
+          <tr><td>标题</td><td>文本</td><td>取自文件名解析结果</td><td>非空；修改后不再被元数据抓取覆盖（标记为「用户已锁定」）</td></tr>
+          <tr><td>年份</td><td>四位数字</td><td>解析结果或元数据源结果</td><td>1900 至当前年份 +2；超出范围提示但允许保存</td></tr>
+          <tr><td>海报</td><td>图片文件</td><td>元数据源海报</td><td>支持常见图片格式；上传后立即生效并锁定，不被后续抓取覆盖</td></tr>
+          <tr><td>评分</td><td>数字（一位小数）</td><td>元数据源评分</td><td>0–10；无来源时显示「暂无评分」，不显示 0 分</td></tr>
+          <tr><td>简介</td><td>多行文本</td><td>元数据源简介</td><td>无长度硬限制；浮层只展示前两行</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ================= FR-03 ================= -->
+    <section id="fr-03">
+      <h2><span class="num">06</span>标签与检索 <span style="font-size:12px;color:var(--txt-faint);font-weight:400;font-family:var(--mono)">FR-03</span></h2>
+      <p><b>目的：</b>满足需求 1「视频有各种标签，用户可以通过标签找到自己的电影」。</p>
+
+      <h4>标签体系</h4>
+      <table>
+        <thead><tr><th style="width:120px">维度</th><th>取值来源</th><th>取值示例</th><th>来源优先级</th></tr></thead>
+        <tbody>
+          <tr><td>内容类型</td><td>元数据源 / 用户</td><td>剧情、科幻、动画、悬疑、动作、爱情、纪录片、恐怖、喜剧</td><td>用户 > 元数据源</td></tr>
+          <tr><td>地区与语言</td><td>元数据源 / 文件名解析</td><td>华语、欧美、日韩、其他；原声语言</td><td>用户 > 元数据源 > 自动推导</td></tr>
+          <tr><td>年份与年代</td><td>元数据源 / 文件名解析</td><td>2024、2020 年代、90 年代</td><td>用户 > 元数据源</td></tr>
+          <tr><td>时长区间</td><td>系统按文件时长归集</td><td>短片（&lt; 40 分钟）、正片（40–150 分钟）、长片（&gt; 150 分钟）</td><td>系统自动，不可手动编辑</td></tr>
+          <tr><td>画质与规格</td><td>系统按文件属性归集</td><td>4K、1080P、720P、HDR、高码率</td><td>系统自动</td></tr>
+          <tr><td>来源</td><td>系统按媒体源归集</td><td>媒体源名称、本地 / 网络</td><td>系统自动</td></tr>
+          <tr><td>观看状态</td><td>系统按播放进度归集</td><td>未看、在看、已看、收藏</td><td>系统自动，用户可手动改为已看/未看</td></tr>
+          <tr><td>字幕状态</td><td>系统检测</td><td>有内嵌字幕、有外挂字幕、无字幕、已生成实时字幕</td><td>系统自动</td></tr>
+          <tr><td>自定义标签</td><td>用户自由创建</td><td>「周末重看」「给孩子看」「待整理」</td><td>用户，可锁定</td></tr>
+        </tbody>
+      </table>
+
+      <h4>检索规则（本文件唯一权威定义）</h4>
+      <ul>
+        <li><b>单标签点击：</b>立即筛选出包含该标签的影片，筛选条上出现对应标签，再点一次取消。</li>
+        <li><b>组合逻辑：</b><b>同一维度内多选为「或」，跨维度之间为「与」。</b>
+          例：类型选「科幻 + 动画」、地区选「欧美」= (科幻 或 动画) 且 地区为欧美。</li>
+        <li><b>排除：</b>标签可被设为排除（如「排除恐怖」），排除作用于最终结果（P1）。</li>
+        <li><b>搜索框：</b>对标题、简介、标签名、演员/导演（来自元数据源）做匹配；与标签筛选为「与」关系。搜索词为空时不影响筛选结果。</li>
+        <li><b>结果为空：</b>显示空状态，列出当前生效的标签，并提供「移除某个标签」与「清空筛选」的直接入口。</li>
+        <li><b>标签来源冲突：</b>元数据源刷新的标签不得覆盖用户手动添加或已锁定标签；自动推导标签在用户显式反对后不再出现（进入该条目的「标签黑名单」）。</li>
+        <li><b>标签合并：</b>同义标签（如「科幻」与「Sci-Fi」）按统一名称合并展示，保留原始写法作为别名，避免同一维度出现重复项。</li>
+        <li><b>保存筛选：</b>当前筛选组合可保存为「智能集合」并出现在导航区，内容随库更新自动变化（P1）。</li>
+      </ul>
+
+      <h4>结果与状态变化</h4>
+      <p>筛选即时生效于海报墙，不产生持久数据（除 P1 的智能集合）。用户新增/删除自定义标签会立即影响该条目的标签与其他筛选结果。</p>
+
+      <h4>异常与边界</h4>
+      <table>
+        <thead><tr><th style="width:190px">场景</th><th>系统行为</th></tr></thead>
+        <tbody>
+          <tr><td>标签数量过多（如自定义标签上百）</td><td>按使用频次排序，超出部分折叠为「更多标签」入口</td></tr>
+          <tr><td>筛选组合无结果</td><td>空状态 + 已生效标签清单，不自动放宽条件</td></tr>
+          <tr><td>元数据源不可用导致新条目无标签</td><td>条目仍可被搜索与播放，仅缺少自动标签；标记「标签待补全」</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ================= FR-04 ================= -->
+    <section id="fr-04">
+      <h2><span class="num">07</span>播放器与续播 <span style="font-size:12px;color:var(--txt-faint);font-weight:400;font-family:var(--mono)">FR-04</span></h2>
+      <p><b>目的：</b>提供完整观看能力，并作为实时字幕与多屏播放的承载界面。</p>
+      <h4>播放控制</h4>
+      <ul>
+        <li>播放 / 暂停、进度拖拽（含时间预览）、音量、静音、倍速（0.5x–3.0x）、全屏、画面比例、截图。</li>
+        <li>音轨选择：列出文件内的全部音轨，默认选优先语言音轨；选择后本轮播放内锁定。</li>
+        <li>字幕轨道选择：见第 4 节「字幕轨道优先级」；同时提供字幕样式设置：字号、颜色、描边、位置（上/中/下）、时间轴偏移（±10 秒，步长 0.5 秒）。</li>
+        <li>键盘与遥控：空格播放/暂停、方向键快进快退、<code>F</code> 全屏、<code>C</code> 切换字幕、<code>S</code> 开启实时字幕。方向键焦点导航用于后续电视大屏形态，P1。</li>
+        <li>在线地址播放时，允许边下边播并显示缓冲状态；缓冲期间显示已缓冲时长。</li>
+      </ul>
+      <h4>进度记忆与续播</h4>
+      <ul>
+        <li>播放超过 30 秒且进度超过总时长 2% 时开始记录；退出播放、关闭应用、切换影片均会写入。</li>
+        <li>再次打开该条目时，若存在有效进度则显示「继续观看 62%」与「从头播放」两个选项；用户超过 <span class="tbd">[TBD]</span> 秒未选择则默认继续。</li>
+        <li>进度达到总时长 95% 视为「已看」，标记为已看状态，不再提示续播。</li>
+        <li>用户手动拖到片尾或选择「从头播放」会覆盖既有进度。</li>
+        <li><b>海报悬停预览不算观看：</b>预览只读取画面与音频，不写入观看进度、不改变「在看 / 已看」状态，也不进入续播提示（见第 11 节「预览实例与进度隔离」）。</li>
+      </ul>
+      <h4>异常与边界</h4>
+      <table>
+        <thead><tr><th style="width:190px">场景</th><th>系统行为</th></tr></thead>
+        <tbody>
+          <tr><td>编码/封装不被当前解码能力支持</td><td>提示「当前设备无法直接解码」，提供切换解码方式的重试入口；仍失败则给出「转换为兼容格式」入口（P1）</td></tr>
+          <tr><td>文件缺失或地址失效</td><td>播放前拦截，显示定位入口，不进入黑屏</td></tr>
+          <tr><td>在线源网络中断</td><td>暂停并显示重连进度，自动重试有限次；失败后提示并可手动重试，进度不丢失</td></tr>
+          <tr><td>多屏模式下某一路解码失败</td><td>仅该屏显示错误卡，其他屏继续播放</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ================= FR-05 ================= -->
+    <section id="fr-05">
+      <h2><span class="num">08</span>实时字幕 <span style="font-size:12px;color:var(--txt-faint);font-weight:400;font-family:var(--mono)">FR-05</span></h2>
+      <p><b>目的：</b>满足需求 2「外文视频没有字幕需要提供实时字幕」——用户不必先到外部找到匹配的字幕文件才能看懂。</p>
+
+      <div class="demo" id="demo-sub">
+        <div class="demo-head">
+          <span class="demo-tag">FR-05</span>
+          <span class="demo-title">实时字幕状态机与叠层呈现</span>
+          <span class="demo-hint">点击开关体验完整状态流</span>
+        </div>
+        <div class="demo-body">
+          <div class="player-frame">
+            <img id="subFrame" alt="播放画面" />
+            <div class="sub-overlay" id="subOverlay" style="display:none">
+              <div class="src" id="subSrc">原文</div>
+              <div class="dst" id="subDst">译文</div>
+            </div>
+          </div>
+          <div class="subctl">
+            <button class="btn" id="subToggle">开启实时字幕</button>
+            <button class="btn sm" id="subBilingual">双语：开</button>
+            <button class="btn sm" id="subSave">保存为字幕轨道</button>
+            <span style="font-size:11.5px;color:var(--txt-faint);font-family:var(--mono)" id="subHint">当前影片：灯笼镇 · 无内嵌/外挂字幕</span>
+          </div>
+          <div class="statebar" id="subStates">
+            <span data-s="idle">未开启</span>
+            <span data-s="init">初始化</span>
+            <span data-s="running">运行中</span>
+            <span data-s="paused">已暂停</span>
+            <span data-s="saved">已保存为轨道</span>
+            <span data-s="fail" class="fail">失败</span>
+          </div>
+        </div>
+        <div class="demo-status" id="subStatus">状态：未开启</div>
+      </div>
+
+      <h4>触发条件</h4>
+      <ul>
+        <li>播放中的视频<b>没有任何可用字幕轨道</b>（既无内嵌，也无外挂）时，播放器控制栏显示「开启实时字幕」入口，并在画面首次出现对白时以非遮挡方式提示一次。</li>
+        <li>视频已有字幕时，该入口不出现但仍在字幕菜单中保留「生成实时字幕」选项，用户可主动叠加。</li>
+        <li>只有用户明确开启后才会启动识别；不默认开启，不静默上传任何音视频内容。</li>
+      </ul>
+      <h4>处理规则</h4>
+      <table>
+        <thead><tr><th style="width:130px">环节</th><th>规则</th></tr></thead>
+        <tbody>
+          <tr><td>语种判定</td><td>自动判定原声语种，判定结果可见且可手动指定；手动指定优先于自动结果</td></tr>
+          <tr><td>目标语言</td><td>默认为简体中文，可切换为原声同语种（即「只做听写、不做翻译」）或设置中指定的其他语言</td></tr>
+          <tr><td>呈现方式</td><td>流式叠加显示：原文与译文分两行，符合一般字幕的样式与位置设置；用户可将样式改为「仅译文」「仅原文」</td></tr>
+          <tr><td>显示时机</td><td>识别结果按句为单位输出并显示；句末标点判定句界。目标延迟 ≤ <span class="tbd">[TBD]</span> 秒（待引擎方案确定后给出具体值）</td></tr>
+          <tr><td>播放联动</td><td>暂停播放时字幕停止更新并保持最后一句；恢复播放后继续。拖动进度条后丢弃旧句，从新位置重新开始</td></tr>
+          <tr><td>多屏联动</td><td>多屏模式下默认仅「主音轨所在窗口」可开启实时字幕，控制栏在非主音轨窗口上保持该入口禁用并说明原因。用户可在设置中放宽</td></tr>
+          <tr><td>结果留存</td><td>一次实时字幕会话的识别结果可保存为一条字幕轨道，绑定到该影片；下次播放该影片时可直接选用，无需重新识别</td></tr>
+        </tbody>
+      </table>
+      <h4>隐私与网络</h4>
+      <div class="callout warn">
+        <span class="ct">待决策——影响成本与隐私</span>
+        识别与翻译是否在本地完成，还是需要把音频送往云端服务，会直接改变成本、隐私承诺与离线可用性。
+        本文件对此不作实现指定，但要求产品在界面上<b>始终明确告知</b>：开启实时字幕后，音频是否离开本机；若离开本机，必须由用户显式授权，且提供仅本地模式。
+        具体方案见开放问题 <b>Q3</b>。
+      </div>
+      <h4>状态与异常</h4>
+      <table>
+        <thead><tr><th style="width:150px">状态</th><th>进入条件</th><th>用户可见表现</th></tr></thead>
+        <tbody>
+          <tr><td>初始化</td><td>用户开启后准备识别能力（首次可能需下载或预热）</td><td>画面角落显示轻量进度与「取消」</td></tr>
+          <tr><td>运行中</td><td>准备完成且正在播放</td><td>字幕随语音出现；控制栏显示运行中标识与占用提示</td></tr>
+          <tr><td>已暂停</td><td>播放被暂停</td><td>字幕保持最后一句，标识变为已暂停</td></tr>
+          <tr><td>失败</td><td>识别能力不可用（算力不足、服务不可达、语种不支持）</td><td>播放不中断；提示原因，并给出三个出口：加载外挂字幕 / 仅做原文听写 / 关闭实时字幕</td></tr>
+          <tr><td>已保存为轨道</td><td>用户点击「保存为字幕轨道」</td><td>该条目字幕状态更新为「有字幕」，后续播放不再需要重新识别</td></tr>
+        </tbody>
+      </table>
+      <ul>
+        <li><b>质量提示：</b>当识别置信度持续偏低（音乐段落、多人重叠、方言）时，显示一次非侵入式提示「当前段落识别质量较低」，不弹窗打断。</li>
+        <li><b>纠错（P1）：</b>允许用户对当前显示句进行修正并即时更新，修正内容写入保存的字幕轨道。</li>
+        <li><b>资源保护：</b>实时字幕开启时显示资源占用，并在设置中提供上限；超过上限自动降级为「仅原文」或暂停字幕，并告知用户。</li>
+      </ul>
+    </section>
+
+    <!-- ================= FR-06 ================= -->
+    <section id="fr-06">
+      <h2><span class="num">09</span>多视频同时播放 <span style="font-size:12px;color:var(--txt-faint);font-weight:400;font-family:var(--mono)">FR-06</span></h2>
+      <p><b>目的：</b>满足需求 4「能够支持多个视频同时播放」。</p>
+      <div class="callout assume">
+        <span class="ct">使用场景 [假设, TBD]</span>
+        本文档按「一屏多路观看」定义该能力：用户在同一窗口内同时播放 2 路以上视频，可指定哪一路出声（对比观看、家庭分屏、多路录像同时查看）。
+        若实际场景是「同一部影片多设备同步播放」或「画中画小窗」，功能定义会不同，见开放问题 Q4。
+      </div>
+
+      <div class="demo" id="demo-multi">
+        <div class="demo-head">
+          <span class="demo-tag">FR-06</span>
+          <span class="demo-title">多屏布局与音频焦点</span>
+          <span class="demo-hint">切换布局 · 点击右上角切换发声</span>
+        </div>
+        <div class="demo-body">
+          <div class="layoutbar" id="layoutBar">
+            <button class="btn on" data-layout="1x2">1 × 2</button>
+            <button class="btn" data-layout="2x2">2 × 2</button>
+            <button class="btn" data-layout="1plus3">1 + 3</button>
+            <button class="btn" data-layout="2x1">2 × 1</button>
+          </div>
+          <div class="stage" id="stage"></div>
+          <div style="font-size:11.5px;color:var(--txt-faint);font-family:var(--mono);margin-top:10px">
+            同时播放上限：4 路（可在设置调整）· 实时字幕仅在主音轨窗口可用
+          </div>
+        </div>
+        <div class="demo-status" id="stageStatus">布局：1 × 2 · 发声窗口：星际回响</div>
+      </div>
+
+      <h4>进入方式</h4>
+      <ul>
+        <li>在库中多选条目（按住 Ctrl/Shift 或勾选）后选择「多屏播放」。</li>
+        <li>在单路播放中选择「添加到多屏」，当前影片保持为主窗口，新影片加入空位。</li>
+        <li>从已保存的「多屏方案」一键恢复一组窗口与布局（P1）。</li>
+      </ul>
+      <h4>布局</h4>
+      <table>
+        <thead><tr><th>布局</th><th>格位数</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>1 × 2</td><td>2</td><td>左右各一路，适合对比观看</td></tr>
+          <tr><td>2 × 1</td><td>2</td><td>上下各一路，适合宽屏与竖屏混合</td></tr>
+          <tr><td>2 × 2</td><td>4</td><td>四宫格</td></tr>
+          <tr><td>1 + 3</td><td>4</td><td>左侧主画面占位更大，右侧三路小窗</td></tr>
+          <tr><td>2 × 3</td><td>6</td><td>P1；受设备能力限制，默认上限仍为 4 路</td></tr>
+        </tbody>
+      </table>
+      <h4>每格能力与规则</h4>
+      <ul>
+        <li>每格独立拥有：影片、播放进度、播放/暂停、音轨、字幕轨道、倍速。操作某格不会影响其他格。</li>
+        <li><b>音频焦点（单声道输出）：</b>同一时刻只有一路处于「发声」状态，其他路静音播放。点击某格右上角可切换发声窗口。切换为即时生效，无过渡停顿。</li>
+        <li><b>混合输出（P1）：</b>允许多路同时出声并各自独立调节音量；由于混音会显著影响体验，默认关闭，由用户在设置中主动开启。</li>
+        <li><b>主窗口：</b>双击某格放大为主窗口，其余缩为侧边条；再次双击还原布局。</li>
+        <li><b>交换：</b>拖拽一格到另一格可交换两格的影片与进度（P1 拖拽交互）。</li>
+        <li><b>实时字幕：</b>默认仅在发声窗口可用（见 FR-05 多屏联动）。</li>
+        <li><b>路数上限：</b>由设备能力决定，默认上限 4，用户可在设置中调整；达到上限时新增请求被拒绝并提示当前上限与调整入口。</li>
+        <li><b>悬停预览：</b>多屏播放期间不提供海报悬停预览——预览与多屏共享同一份解码额度，多屏播放时浏览海报墙只显示信息层并在浮层标注原因（见第 11 节「预览实例与进度隔离」）。</li>
+        <li><b>退出：</b>退出多屏时，询问「保留播放进度并回到单路」或「全部停止」；选择保留时，音频焦点窗口的进度被记忆。</li>
+      </ul>
+      <h4>异常与边界</h4>
+      <table>
+        <thead><tr><th style="width:190px">场景</th><th>系统行为</th></tr></thead>
+        <tbody>
+          <tr><td>某一路解码/加载失败</td><td>该格显示错误卡与「重试 / 更换影片」，其余格继续播放</td></tr>
+          <tr><td>超出设备同时解码能力（卡顿、丢帧）</td><td>提示性能受限，建议减小布局或关闭实时字幕；不自动关闭用户已开启的窗口</td></tr>
+          <tr><td>某一路为在线地址且网络中断</td><td>该格进入缓冲/重连状态，不中断其他格</td></tr>
+          <tr><td>窗口过小导致画面不可辨</td><td>保持播放，底部显示影片名与进度，供用户判断</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ================= FR-07 ================= -->
+    <section id="fr-07">
+      <h2><span class="num">10</span>可迭代性要求 <span style="font-size:12px;color:var(--txt-faint);font-weight:400;font-family:var(--mono)">FR-07</span></h2>
+      <p><b>目的：</b>落实需求 5「架构上能够支持持续迭代」。本节只描述<b>产品层面的可扩展约束</b>与用户可见的兼容承诺，不指定技术实现（技术架构另出方案）。</p>
+      <table>
+        <thead><tr><th style="width:170px">可扩展点</th><th>产品层要求</th><th>约束的原因</th></tr></thead>
+        <tbody>
+          <tr><td>媒体源类型</td><td>新增一种源类型时，既有的入库、标签、检索、播放行为保持不变</td><td>在线源类型很可能持续增加（网盘、订阅、局域网设备）</td></tr>
+          <tr><td>元数据与海报来源</td><td>数据来源可切换、可新增、可关闭；某一来源失败时其余来源仍可完成抓取，且不影响已锁定的用户数据</td><td>单一来源失效不应导致整库不可用</td></tr>
+          <tr><td>字幕能力</td><td>识别与翻译能力可替换、可增删语种；所有生成结果统一为「字幕轨道」对象，播放器行为与来源无关</td><td>实时字幕是本产品最可能迭代的部分</td></tr>
+          <tr><td>标签维度</td><td>新增筛选维度不需要改变检索交互，维度以配置方式接入</td><td>标签体系会随使用不断生长</td></tr>
+          <tr><td>界面模块</td><td>海报墙、播放器、字幕、多屏为可独立升级的模块，任一模块升级不要求整库重新入库</td><td>避免小改动引发全量重建</td></tr>
+          <tr><td>数据可迁移</td><td>用户数据（标签、收藏、观看进度、生成的字幕轨道、设置的隐私选项）可导出与导入；升级后用户数据不丢失</td><td>不迁移数据会阻塞任何一次升级</td></tr>
+          <tr><td>功能开关</td><td>新功能默认关闭、可逐步放开，出现问题时用户可关闭该功能而继续使用其余部分</td><td>保证单个新功能失败不拖垮主流程</td></tr>
+        </tbody>
+      </table>
+      <div class="callout">
+        <span class="ct">对用户可见的兼容承诺</span>
+        <ul style="margin-bottom:0">
+          <li>升级到新版本后，用户已添加的媒体源、已编辑的标题与海报、自定义标签、观看进度、保存的字幕轨道全部保持有效，无需重新入库。</li>
+          <li>新增的模块可以独立关闭，关闭后原有播放与检索流程不受影响。</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ================= 4 ================= -->
+    <section id="s4">
+      <h2><span class="num">11</span>共享规则与异常</h2>
+
+      <h3>字幕轨道优先级</h3>
+      <p>本规则为全文唯一权威定义，FR-04 与 FR-05 均引用此规则：</p>
+      <div class="flow">
+        <span class="hot">用户手动指定（已锁定）</span><i>&gt;</i>
+        <span>外挂字幕文件</span><i>&gt;</i>
+        <span>内嵌字幕轨道</span><i>&gt;</i>
+        <span>实时生成</span>
+      </div>
+      <ul>
+        <li>用户手动选择某条轨道后，该影片置为「字幕已锁定」，后续新增的字幕文件或刷新结果不会改变默认选择。</li>
+        <li>同一优先级的多个轨道按语种偏好与用户最近选择排序。</li>
+        <li>实时字幕属于最低优先级，因此只要出现可用的外挂或内嵌字幕，实时字幕入口的推荐位置后移，但用户仍可主动叠加。</li>
+      </ul>
+
+      <h3>标签来源与冲突</h3>
+      <ul>
+        <li>来源优先级：用户手动 &gt; 元数据源 &gt; 自动推导。</li>
+        <li>用户锁定某标签后，该标签不再被任何自动流程移除。</li>
+        <li>用户明确反对某个自动标签后，该标签进入该条目的黑名单，不再自动出现，但在筛选维度中仍可被用户主动添加。</li>
+      </ul>
+
+      <h3>音频焦点（多屏）</h3>
+      <ul>
+        <li>单声道输出模式：仅一路发声；切换发声窗口即时生效。</li>
+        <li>发声窗口默认是进入多屏时的第一路；用户切换后保持，直到窗口关闭或用户再次切换。</li>
+        <li>发声窗口被关闭时，音频焦点自动移交给当前仍在播放的窗口（按屏位顺序）。</li>
+        <li>实时字幕仅跟随发声窗口可用（可放宽）。</li>
+      </ul>
+
+      <h3>预览实例与进度隔离（悬停自动播放）</h3>
+      <p>本节为全文唯一权威定义，FR-02 / FR-04 / FR-06 均引用此规则：</p>
+      <table>
+        <thead><tr><th style="width:170px">规则</th><th>定义</th></tr></thead>
+        <tbody>
+          <tr><td>实例性质</td><td>悬停预览是一路<b>独立的低优先级播放实例</b>，与正式播放实例互不复用、互不干扰。</td></tr>
+          <tr><td>音频</td><td>预览<b>强制静音</b>，不参与音频焦点决策，因此既不打断单路播放，也不抢走多屏的发声窗口。</td></tr>
+          <tr><td>并发</td><td>同一时刻只允许 1 路预览；移入另一张海报时先终止上一路，再从头播放新的片段。</td></tr>
+          <tr><td>进度隔离</td><td>预览不写入观看进度、不改变「在看 / 已看 / 收藏」状态、不产生续播记录；移开或未播完即丢弃，不复用位置。</td></tr>
+          <tr><td>额度共享</td><td>预览与多屏播放共享同一份并发上限；额度不足时预览被<b>拒绝</b>，不抢占已在播放的窗口，并在浮层标注原因（可见的降级）。</td></tr>
+          <tr><td>资源优先级</td><td>出现解码紧张时，预览最先被终止，其次才考虑降低多屏画质；用户已开启的播放窗口不被自动关闭。</td></tr>
+          <tr><td>可关闭</td><td>设置中可整体关闭悬停自动预览；关闭后悬停只显示信息层，不改变其余浏览行为。</td></tr>
+        </tbody>
+      </table>
+
+      <h3>隐私与网络</h3>
+      <table>
+        <thead><tr><th style="width:200px">能力</th><th>默认</th><th>用户可见性</th></tr></thead>
+        <tbody>
+          <tr><td>元数据与海报抓取</td><td>开启（会向外部服务发送影片标题等信息）</td><td>设置中可关闭；关闭后仅使用本地解析信息</td></tr>
+          <tr><td>实时字幕</td><td>关闭，需用户明确开启</td><td>开启时明确告知音频是否离开本机；提供仅本地模式</td></tr>
+          <tr><td>观看数据</td><td>仅本地保存，不主动外传</td><td>可导出、可清除</td></tr>
+        </tbody>
+      </table>
+
+      <h3>不可逆与需确认的动作</h3>
+      <table>
+        <thead><tr><th>动作</th><th>确认与恢复</th></tr></thead>
+        <tbody>
+          <tr><td>移除媒体源并删除条目与用户数据</td><td>二次确认，明确列出将丢失的标签/收藏/进度数量；提供「先导出数据」入口</td></tr>
+          <tr><td>清空筛选与取消锁定</td><td>不需要确认，可撤销</td></tr>
+          <tr><td>关闭实时字幕并丢弃未保存的识别结果</td><td>若存在未保存结果，提示「是否保存为字幕轨道」，默认保存</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ================= 5 ================= -->
+    <section id="s5">
+      <h2><span class="num">12</span>开放问题</h2>
+      <p>以下问题会实质改变范围、成本或核心流程，需要评审时给出结论；其余缺口已在上文以 <span class="asm">[假设]</span> 标记。</p>
+      <div class="q">
+        <div class="item">
+          <h4>Q1 · 首发平台与形态</h4>
+          <div class="why">影响全部界面与交互。默认判断：桌面客户端、Windows 优先，电视大屏与投屏后置。<b>需确认。</b></div>
+        </div>
+        <div class="item">
+          <h4>Q2 · 在线资源的边界与合规</h4>
+          <div class="why">P0 目前只覆盖「可访问的视频直链」。是否要支持网盘、订阅型在线源或第三方平台内容，会显著改变功能范围，并引入合规与授权边界问题（是否仅处理用户自有或获得授权的资源）。<b>需确认。</b></div>
+        </div>
+        <div class="item">
+          <h4>Q3 · 实时字幕的识别与翻译放在本地还是云端</h4>
+          <div class="why">决定成本（云端按量计费）、隐私承诺（音频是否离开本机）、离线可用性与最低硬件要求，并决定「目标延迟」这个数值能否给出。<b>需确认。</b></div>
+        </div>
+        <div class="item">
+          <h4>Q4 · 多视频同时播放的真实场景</h4>
+          <div class="why">当前按「一屏多路、单一发声」定义。若真实诉求是画中画、多设备同步播放或监控墙式长时运行，交互与资源策略都要重写。<b>需确认。</b></div>
+        </div>
+        <div class="item">
+          <h4>Q5 · 原始需求第 3 条「并且移动到」的含义 — 已确认</h4>
+          <div class="why">v1.1 已由用户确认为「鼠标移动到海报上自动播放该影片的精华片段」，悬停主行为是静音自动预览，并已升级为 P0（见 FR-02）。本条不再作为开放问题；只剩「哪 30 秒算精华」的判定基线待定，见 Q7。</div>
+        </div>
+        <div class="item">
+          <h4>Q6 · 是否需要多用户与多设备共享同一片库</h4>
+          <div class="why">当前为单机个人模式（同设备多观看者，无账号）。引入账号与共享库会改变权限模型、数据存放位置与冲突处理规则。</div>
+        </div>
+        <div class="item">
+          <h4>Q7 · 续播默认等待时长、字幕目标延迟与精华片段起始位置</h4>
+          <div class="why">三处 <span class="tbd">[TBD]</span> 数值需要基线或明确要求后才能确定，当前不编造具体数字：续播提示的默认等待秒数、实时字幕的目标延迟、悬停预览「哪连续 30 秒算精华」的判定基线。</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="s6">
+      <h2><span class="num">13</span>变更记录</h2>
+      <table>
+        <thead><tr><th style="width:90px">版本</th><th style="width:120px">日期</th><th>变更内容</th></tr></thead>
+        <tbody>
+          <tr><td>v1.1</td><td>2026-10-16</td><td>用户澄清原始需求第 3 条：鼠标移动到海报上自动播放该影片的精华片段。据此把「悬停自动预览」从 P1 升级为 P0，补齐触发延迟（300ms）、片段长度（默认 30 秒）、强制静音、单路并发、重复悬停从头播放、结束停在末帧、三种降级回退（已关闭 / 无片段 / 多屏额度不足）与可关闭开关；新增第 11 节「预览实例与进度隔离」作为唯一权威定义，并在 FR-04 与 FR-06 引用；Q5 标记为已确认，Q7 增加「精华片段起始位置」待定项；海报墙演示改为可交互的悬停预览（含降级态）。</td></tr>
+          <tr><td>v1.0</td><td>2026-10-16</td><td>首版：依据 5 条原始需求整理产品契约、P0 旅程、7 个功能模块与共享规则；对第 3 条需求与多屏场景给出标注假设；列出 7 项待确认开放问题。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      影院 Cinema · PRD v1.1 · 本文档描述产品行为与业务决策，不含技术实现方案 · 待评审
+    </footer>
+  </main>
+</div>
+
+<script>
+/* ============ 数据 ============ */
+const POSTER = (p, size) => "https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=" + p + "&image_size=" + (size || "portrait_4_3");
+
+const MOVIES = [
+  { id:"m1", title:"星际回响", year:2024, dur:"2h08", rating:8.6, dims:{类型:"科幻",地区:"欧美",状态:"未看"},
+    tags:["科幻","欧美","未看","4K","HDR"], sub:"有内嵌字幕",
+    art:POSTER("cinematic%20sci-fi%20movie%20poster%2C%20astronaut%20silhouette%20before%20a%20giant%20glowing%20planet%2C%20deep%20blue%20and%20amber%2C%20dramatic%20lighting%2C%20vertical%20poster%2C%20no%20text"),
+    syn:"一支深空勘探队在返航途中收到来自未知信号源的回应，返航路线因此改变。" },
+  { id:"m2", title:"灯笼镇", year:2023, dur:"1h52", rating:8.2, dims:{类型:"动画",地区:"日韩",状态:"已看"},
+    tags:["动画","日韩","已看","1080P","无字幕"], sub:"无字幕（可开启实时字幕）",
+    art:POSTER("anime%20style%20animated%20film%20poster%2C%20young%20girl%20and%20floating%20paper%20lanterns%20above%20a%20mountain%20village%20at%20dusk%2C%20warm%20golden%20colors%2C%20vertical%20poster%2C%20no%20text"),
+    syn:"小镇每年一度的灯笼节上，女孩决定把积攒的话说完。" },
+  { id:"m3", title:"雨夜行", year:2022, dur:"1h58", rating:7.9, dims:{类型:"悬疑",地区:"欧美",状态:"在看"},
+    tags:["悬疑","欧美","在看","1080P","高码率"], sub:"有外挂字幕",
+    art:POSTER("noir%20detective%20thriller%20movie%20poster%2C%20rain%20soaked%20city%20alley%2C%20man%20in%20trench%20coat%20under%20a%20streetlamp%2C%20teal%20and%20amber%2C%20vertical%20poster%2C%20no%20text"),
+    syn:"连续七天的雨里，一名调查员开始怀疑自己记录的时间线。" },
+  { id:"m4", title:"桥上的三天", year:2021, dur:"1h46", rating:7.4, dims:{类型:"爱情",地区:"华语",状态:"未看"},
+    tags:["爱情","华语","未看","1080P"], sub:"有内嵌字幕",
+    art:POSTER("romantic%20drama%20film%20poster%2C%20couple%20silhouette%20on%20a%20long%20bridge%20at%20sunset%2C%20soft%20golden%20haze%2C%20minimal%2C%20vertical%20poster%2C%20no%20text"),
+    syn:"两个人在同一座桥上擦肩三次，每次都晚了一步。" },
+  { id:"m5", title:"极速霓虹", year:2025, dur:"2h14", rating:8.0, dims:{类型:"动作",地区:"欧美",状态:"未看"},
+    tags:["动作","欧美","未看","4K","无字幕"], sub:"无字幕（可开启实时字幕）",
+    art:"", pv:false, /* 演示：海报缺失占位 + 无可用精华片段（预览降级态） */
+    syn:"一场贯穿整夜的城市竞速，赢家和输家都在同一条路上。" },
+  { id:"m6", title:"鲸落", year:2020, dur:"1h30", rating:9.1, dims:{类型:"纪录片",地区:"其他",状态:"已看"},
+    tags:["纪录片","其他","已看","4K","HDR"], sub:"有内嵌字幕",
+    art:POSTER("nature%20documentary%20film%20poster%2C%20humpback%20whale%20breaching%20at%20golden%20hour%2C%20ocean%20spray%2C%20epic%20scale%2C%20vertical%20poster%2C%20no%20text"),
+    syn:"一次观测记录，从鲸的身体落向海底的一整片生命。" },
+  { id:"m7", title:"雾中的房", year:2019, dur:"1h44", rating:6.8, dims:{类型:"恐怖",地区:"欧美",状态:"未看"},
+    tags:["恐怖","欧美","未看","720P"], sub:"有内嵌字幕",
+    art:POSTER("horror%20movie%20poster%2C%20abandoned%20victorian%20house%20in%20thick%20fog%2C%20single%20lit%20window%2C%20desaturated%20green%20and%20grey%2C%20vertical%20poster%2C%20no%20text"),
+    syn:"一家人搬进雾里的房子，每晚多出一扇门。" },
+  { id:"m8", title:"气球计划", year:2024, dur:"1h35", rating:7.6, dims:{类型:"喜剧",地区:"华语",状态:"收藏"},
+    tags:["喜剧","华语","收藏","1080P"], sub:"有外挂字幕",
+    art:POSTER("feel%20good%20family%20comedy%20movie%20poster%2C%20colorful%20suburban%20house%20with%20balloons%20and%20confetti%2C%20bright%20pastel%20sky%2C%20vertical%20poster%2C%20no%20text"),
+    syn:"为了兑现一句随口的承诺，全家用了七百个气球。" }
+];
+
+/* ============ 演示 A：海报墙 + 标签筛选 + 悬停自动播放精华片段 ============ */
+(function(){
+  const DIMS = ["类型","地区","状态"];
+  const state = { 类型:new Set(), 地区:new Set(), 状态:new Set() };
+  const filtersEl = document.getElementById("tagFilters");
+  const gridEl = document.getElementById("posterGrid");
+  const statusEl = document.getElementById("posterStatus");
+  const pvToggle = document.getElementById("pvToggle");
+  const capToggle = document.getElementById("capToggle");
+
+  /* 预览参数：精华片段默认 30 秒；演示按 4 倍速推进，便于观察 */
+  const CLIP_LEN = 30, SPEED = 4, HOVER_MS = 300;
+  let pvOn = true, capFull = false;
+  let pv = null, hoverTimer = null;
+
+  DIMS.forEach(dim=>{
+    const vals = [...new Set(MOVIES.map(m=>m.dims[dim]))];
+    const g = document.createElement("div");
+    g.className = "fgroup";
+    g.innerHTML = '<span class="flabel">'+dim+'</span>';
+    vals.forEach(v=>{
+      const b = document.createElement("button");
+      b.className = "tagbtn"; b.textContent = v;
+      b.onclick = ()=>{
+        state[dim].has(v) ? state[dim].delete(v) : state[dim].add(v);
+        b.classList.toggle("on", state[dim].has(v));
+        render();
+      };
+      g.appendChild(b);
+    });
+    filtersEl.appendChild(g);
+  });
+
+  function match(m){
+    /* 同维度内 OR，跨维度 AND */
+    return DIMS.every(d => state[d].size === 0 || state[d].has(m.dims[d]));
+  }
+
+  /* 返回预览被拒绝的原因；返回 null 表示可以预览 */
+  function pvBlockReason(m){
+    if (!pvOn)   return "悬停自动预览已关闭：只显示信息层，不播放（设置中可整体关闭）";
+    if (m.pv === false) return "无预览片段：该影片暂无可用的精华片段，不重试、不阻塞浏览";
+    if (capFull) return "多屏播放已达同时播放上限：预览被拒绝，不抢占正在播放的窗口";
+    return null;
+  }
+
+  function stopPreview(reason){
+    if (hoverTimer){ clearTimeout(hoverTimer); hoverTimer = null; }
+    if (!pv) return;
+    const card = document.getElementById("pv-"+pv.id);
+    if (card){
+      card.classList.remove("previewing");
+      const bar = card.querySelector(".pvbar i");
+      if (bar) bar.style.width = "0";
+      const tc = card.querySelector(".pv .tcode");
+      if (tc) tc.textContent = "00:00 / 00:30";
+    }
+    pv = null;
+    if (reason) statusEl.textContent = reason;
+  }
+
+  function tick(){
+    if (!pv) return;
+    pv.t += 0.1 * SPEED;
+    const card = document.getElementById("pv-"+pv.id);
+    if (!card){ stopPreview(); return; }
+    const bar = card.querySelector(".pvbar i");
+    const tc = card.querySelector(".pv .tcode");
+    if (pv.t >= CLIP_LEN){
+      if (pv.timer){ clearInterval(pv.timer); pv.timer = null; }
+      pv.done = true;
+      if (bar) bar.style.width = "100%";
+      if (tc) tc.textContent = "预览结束";
+      statusEl.textContent = "「"+pv.title+"」精华片段播放完毕，停在末帧；鼠标移开后复位到静止海报帧";
+      return;
+    }
+    if (bar) bar.style.width = (pv.t/CLIP_LEN*100).toFixed(1)+"%";
+    if (tc) tc.textContent = "00:"+String(Math.floor(pv.t)).padStart(2,"0")+" / 00:30";
+  }
+
+  function startPreview(m, card){
+    pv = { id:m.id, title:m.title, t:0, done:false, timer:null };
+    card.classList.add("previewing");
+    const tc = card.querySelector(".pv .tcode");
+    if (tc) tc.textContent = "00:00 / 00:30";
+    pv.timer = setInterval(tick, 100);
+    statusEl.textContent = "正在预览「"+m.title+"」的精华片段：静音 · 独立低优先级实例 · 不写入观看进度";
+  }
+
+  function render(){
+    /* 重新渲染前先终止当前预览 */
+    if (hoverTimer){ clearTimeout(hoverTimer); hoverTimer = null; }
+    if (pv){ if (pv.timer) clearInterval(pv.timer); pv = null; }
+
+    const list = MOVIES.filter(match);
+    gridEl.innerHTML = "";
+    list.forEach(m=>{
+      const card = document.createElement("div");
+      card.className = "poster";
+      card.id = "pv-"+m.id;
+      const art = m.art
+        ? '<img loading="lazy" src="'+m.art+'" alt="'+m.title+' 海报" />'
+        : '<div class="noart"><b>'+m.title+'</b><em>海报待补全</em></div>';
+      card.innerHTML = art
+        + '<div class="badge">'+(m.rating?m.rating.toFixed(1):"暂无评分")+'</div>'
+        + (m.sub.indexOf("无字幕")===0 ? '<div class="badge sub">无字幕</div>' : '')
+        + '<div class="pv"><span class="live">预览</span><span class="mute">静音</span><span class="tcode">00:00 / 00:30</span></div>'
+        + '<div class="overlay">'
+        +   '<div class="pvnote"></div>'
+        +   '<div class="ot">'+m.title+'</div>'
+        +   '<div class="om">'+m.year+' · '+m.dur+' · '+m.rating.toFixed(1)+'</div>'
+        +   '<div class="tags">'+m.tags.slice(0,4).map(t=>'<span>'+t+'</span>').join("")+'</div>'
+        +   '<div class="acts"><button class="btn">播放</button><button class="btn">详情</button></div>'
+        + '</div>'
+        + '<div class="pvbar"><i></i></div>';
+
+      card.addEventListener("mouseenter", ()=>{
+        const reason = pvBlockReason(m);
+        if (reason){
+          const note = card.querySelector(".pvnote");
+          note.textContent = reason; note.style.display = "block";
+          statusEl.textContent = "预览不可用 · 「"+m.title+"」："+reason;
+          return;
+        }
+        hoverTimer = setTimeout(()=>{
+          hoverTimer = null;
+          stopPreview();                 /* 并发只允许 1 路：先终止上一路 */
+          startPreview(m, card);
+        }, HOVER_MS);
+      });
+      card.addEventListener("mouseleave", ()=>{
+        const wasPreview = pv && pv.id === m.id;
+        if (wasPreview) stopPreview("已停止预览「"+m.title+"」并复位 · 未写入观看进度，不改变在看/已看状态");
+        else if (hoverTimer){ clearTimeout(hoverTimer); hoverTimer = null; }
+        const note = card.querySelector(".pvnote");
+        if (note) note.style.display = "none";
+      });
+
+      card.querySelector(".acts").addEventListener("click", e=>{
+        const label = e.target.textContent;
+        statusEl.textContent = "已触发「"+label+"」：" + m.title + "（"+m.sub+"）";
+      });
+      gridEl.appendChild(card);
+    });
+    const picked = DIMS.filter(d=>state[d].size).map(d=>d+":"+[...state[d]].join("/"));
+    statusEl.textContent = "当前筛选："+(picked.length?picked.join(" 且 "):"全部影片")+"（"+list.length+" 部）"
+      + (list.length===0 ? " · 空状态：请移除部分标签" : " · 悬停任意海报可预览精华片段");
+  }
+
+  pvToggle.onclick = ()=>{
+    pvOn = !pvOn;
+    pvToggle.classList.toggle("on", pvOn);
+    pvToggle.textContent = "悬停自动预览：" + (pvOn ? "开" : "关");
+    if (!pvOn) stopPreview();
+    statusEl.textContent = pvOn
+      ? "已开启悬停自动预览：悬停 300ms 后静音播放精华片段"
+      : "已关闭悬停自动预览：悬停只显示信息层，不播放（省电 / 无障碍）";
+  };
+  capToggle.onclick = ()=>{
+    capFull = !capFull;
+    capToggle.classList.toggle("on", capFull);
+    capToggle.textContent = "模拟多屏已达上限：" + (capFull ? "是" : "否");
+    if (capFull) stopPreview();
+    statusEl.textContent = capFull
+      ? "多屏播放已达同时播放上限：悬停预览将被拒绝并在信息层标注原因（可见的降级）"
+      : "多屏额度已释放：悬停预览恢复可用";
+  };
+
+  render();
+})();
+
+/* ============ 演示 B：多屏布局与音频焦点 ============ */
+(function(){
+  const bar = document.getElementById("layoutBar");
+  const stage = document.getElementById("stage");
+  const statusEl = document.getElementById("stageStatus");
+  const LAYOUTS = {
+    "1x2":  { cols:"1fr 1fr", rows:"1fr", count:2 },
+    "2x1":  { cols:"1fr", rows:"1fr 1fr", count:2 },
+    "2x2":  { cols:"1fr 1fr", rows:"1fr 1fr", count:4 },
+    "1plus3":{ cols:"2fr 1fr", rows:"1fr 1fr 1fr", count:4 }
+  };
+  let cur = "1x2";
+  let audioIdx = 0;
+  let failedIdx = -1;
+
+  function films(){ return MOVIES.filter(m=>m.art).slice(0, LAYOUTS[cur].count); }
+
+  function draw(){
+    const L = LAYOUTS[cur];
+    stage.style.gridTemplateColumns = L.cols;
+    stage.style.gridTemplateRows = L.rows;
+    stage.innerHTML = "";
+    films().forEach((m,i)=>{
+      const t = document.createElement("div");
+      t.className = "tile" + (i===audioIdx ? " main" : "");
+      t.innerHTML = '<img src="'+m.art+'" alt="'+m.title+'" />'
+        + '<div class="tlabel">'+m.title+' · '+m.sub.replace("（可开启实时字幕）","")+'</div>'
+        + '<div class="sound'+(i===audioIdx?" on":"")+'">'+(i===audioIdx?"发声":"静音")+'</div>'
+        + (i===failedIdx ? '<div class="err">该路解码失败<br/>重试 / 更换影片<br/>（其他窗口不受影响）</div>' : '');
+      if (i===0 && cur==="1plus3"){ t.style.gridRow = "span 3"; }
+      t.querySelector(".sound").onclick = e=>{
+        e.stopPropagation();
+        if (i===failedIdx){ statusEl.textContent = "布局："+cur.replace("x"," × ")+" · 该窗口解码失败，无法成为发声窗口"; return; }
+        audioIdx = i; draw();
+      };
+      t.ondblclick = ()=>{
+        if (i===failedIdx) failedIdx = -1; else failedIdx = (i===0?1:0);
+        draw();
+      };
+      stage.appendChild(t);
+    });
+    const nm = films()[audioIdx] ? films()[audioIdx].title : "—";
+    statusEl.textContent = "布局："+cur.replace("x"," × ")+" · 发声窗口："+nm+(failedIdx>=0?" · 有一路显示错误卡（双击窗口可切换该状态）":"");
+  }
+  bar.querySelectorAll("button").forEach(b=>{
+    b.onclick = ()=>{
+      bar.querySelectorAll("button").forEach(x=>x.classList.remove("on"));
+      b.classList.add("on");
+      cur = b.dataset.layout; audioIdx = 0; failedIdx = -1; draw();
+    };
+  });
+  draw();
+})();
+
+/* ============ 演示 C：实时字幕状态机 ============ */
+(function(){
+  const toggle = document.getElementById("subToggle");
+  const bi = document.getElementById("subBilingual");
+  const save = document.getElementById("subSave");
+  const overlay = document.getElementById("subOverlay");
+  const srcEl = document.getElementById("subSrc");
+  const dstEl = document.getElementById("subDst");
+  const statesEl = document.getElementById("subStates");
+  const statusEl = document.getElementById("subStatus");
+  const frame = document.getElementById("subFrame");
+  frame.src = MOVIES[1].art;
+
+  const LINES = [
+    ["ランタン祭りの夜、彼女は決めた。", "灯笼节的夜里，她下定了决心。"],
+    ["ずっと言えなかったことを、今夜全部話す。", "一直没能说出口的话，今晚要全部说完。"],
+    ["町の灯りが、川に落ちていく。", "镇上的灯火，一盏盏落进河里。"],
+    ["それでも、声は届いた。", "即便如此，声音还是传到了。"]
+  ];
+  let bilingual = true, timer = null, idx = 0, mode = "idle";
+
+  function setStates(active){
+    statesEl.querySelectorAll("span").forEach(s=>{
+      const on = s.dataset.s === active;
+      s.classList.toggle("on", on && active !== "fail");
+    });
+  }
+  function setStatus(t){ statusEl.textContent = "状态："+t; }
+  function showLine(){
+    const l = LINES[idx % LINES.length];
+    if (bilingual){
+      srcEl.style.display = "block"; srcEl.textContent = l[0];
+      dstEl.style.display = "inline-block"; dstEl.textContent = l[1];
+    } else {
+      srcEl.style.display = "block"; srcEl.textContent = l[1];
+      dstEl.style.display = "none";
+    }
+  }
+  function stop(){
+    if (timer) clearInterval(timer); timer = null;
+  }
+  function start(){
+    overlay.style.display = "block";
+    idx = 0; showLine();
+    stop();
+    timer = setInterval(()=>{ idx++; showLine(); }, 2600);
+    setStates("running"); setStatus("运行中 · 目标语言：简体中文 · 延迟 [TBD]");
+    toggle.textContent = "关闭实时字幕"; toggle.classList.add("on");
+  }
+  toggle.onclick = ()=>{
+    if (mode === "idle"){
+      mode = "init"; setStates("init"); setStatus("初始化 · 准备识别能力（可取消）");
+      toggle.textContent = "取消"; toggle.classList.add("on");
+      setTimeout(()=>{ if (mode==="init"){ mode="running"; start(); } }, 1100);
+    } else {
+      mode = "idle"; stop(); overlay.style.display="none";
+      setStates("idle"); setStatus("未开启 · 无静默上传");
+      toggle.textContent = "开启实时字幕"; toggle.classList.remove("on");
+    }
+  };
+  bi.onclick = ()=>{
+    bilingual = !bilingual;
+    bi.textContent = "双语：" + (bilingual ? "开" : "关");
+    bi.classList.toggle("on", bilingual);
+    if (mode === "running") showLine();
+  };
+  save.onclick = ()=>{
+    if (mode !== "running"){ setStatus("未开启实时字幕，无可保存内容"); return; }
+    stop(); overlay.style.display="none";
+    mode = "idle"; setStates("saved");
+    setStatus("已保存为字幕轨道 · 该条目字幕状态更新为「有字幕」");
+    toggle.textContent = "开启实时字幕"; toggle.classList.remove("on");
+  };
+  setStates("idle");
+})();
+
+/* ============ 侧边栏滚动高亮 ============ */
+(function(){
+  const links = [...document.querySelectorAll("#nav a")];
+  const targets = links.map(a=>document.querySelector(a.getAttribute("href"))).filter(Boolean);
+  const io = new IntersectionObserver(es=>{
+    es.forEach(e=>{
+      if (e.isIntersecting){
+        links.forEach(l=>l.classList.toggle("active", l.getAttribute("href") === "#"+e.target.id));
+      }
+    });
+  }, { rootMargin:"-12% 0px -70% 0px" });
+  targets.forEach(t=>io.observe(t));
+})();
+</script>
+</body>
+</html>

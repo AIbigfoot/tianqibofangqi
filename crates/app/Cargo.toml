@@ -1,0 +1,12 @@
+[package]
+name = "cinema-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cinema-domain = { workspace = true }
+
+[dev-dependencies]
+cinema-domain = { workspace = true }
+# 入库编排的测试直接驱动真实的本地目录提供者，验证端口间的真实协作
+cinema-adapters = { workspace = true }

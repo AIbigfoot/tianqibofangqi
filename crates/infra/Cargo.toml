@@ -1,0 +1,12 @@
+[package]
+name = "cinema-infra"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cinema-domain = { workspace = true }
+# bundled 特性自带 SQLite 源码（含 FTS5），避免依赖系统库
+rusqlite = { version = "0.31", features = ["bundled"] }
+# 导出包为「结构化 JSON 清单 + 资源目录」（PRD FR-07），序列化在此层收口
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }

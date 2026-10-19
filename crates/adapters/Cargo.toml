@@ -1,0 +1,16 @@
+[package]
+name = "cinema-adapters"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cinema-domain = { workspace = true }
+serde_json = { version = "1" }
+
+[dev-dependencies]
+# 集成测试需要直接引用领域类型与端口 trait
+cinema-domain = { workspace = true }
+
+[[bin]]
+name = "cinema-asr"
+path = "src/bin/cinema_asr.rs"

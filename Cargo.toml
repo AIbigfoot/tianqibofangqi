@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/adapters",
+    "crates/app",
+    "crates/infra",
+]
+
+# src-tauri 是独立包（自带 [workspace]），不并入此 workspace，避免 `cargo test` 连带构建桌面端依赖。
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+cinema-domain = { path = "crates/domain" }
+cinema-adapters = { path = "crates/adapters" }
+cinema-app = { path = "crates/app" }
+cinema-infra = { path = "crates/infra" }

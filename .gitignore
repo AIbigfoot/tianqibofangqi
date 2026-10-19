@@ -1,0 +1,18 @@
+# 构建产物 / 缓存（体积大，可由 cargo 重新生成）
+/target/
+/src-tauri/target/
+/tmp/
+*.pdb
+*.rlib
+
+# 运行时 sidecar：体积大，不随源码走（各自在本机准备）
+/src-tauri/*.dll
+/src-tauri/*.exe
+*.zip
+
+# 编辑器 / 系统
+.trae-html-share-packages/
+.vscode/
+Thumbs.db
+.DS_Store
+*.log

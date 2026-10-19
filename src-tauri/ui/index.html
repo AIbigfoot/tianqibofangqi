@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>影院</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- M1：海报墙 + 悬停预览 + 播放页。自包含静态页，不依赖网络与构建步骤。 -->
+    <header id="topbar" class="topbar">
+      <div class="brand"><span class="mark">影</span><span class="name">影院</span></div>
+      <div class="adder">
+        <input
+          id="dir-input"
+          class="dir-input"
+          type="text"
+          spellcheck="false"
+          placeholder="本地目录绝对路径，例如 D:\Movies"
+        />
+        <button id="add-btn" class="btn primary">添加目录</button>
+        <button id="scan-btn" class="btn">扫描入库</button>
+        <button id="data-btn" class="btn" title="导出 / 导入库（迁移到其它机器）">数据迁移</button>
+        <button id="online-btn" class="btn" title="粘贴列表页 URL，联网导入在线视频与封面">联网导入</button>
+      </div>
+      <button id="console-btn" class="btn" title="主机模式：大屏 + 键盘导航（F10 切换）">主机模式</button>
+      <label class="switch" title="关闭后悬停只显示信息层，不自动播放预览">
+        <input id="preview-toggle" type="checkbox" checked />
+        <span>悬停预览</span>
+      </label>
+      <div id="stats" class="stats">—</div>
+    </header>
+
+    <!-- 检索区（FR-02 / FR-03）：搜索框 + 已选标签条 + 排序 + 海报尺寸 -->
+    <section id="searchbar" class="searchbar">
+      <input
+        id="search-input"
+        class="search-input"
+        type="text"
+        spellcheck="false"
+        placeholder="搜索标题 / 简介 / 标签名"
+      />
+      <button id="filter-toggle" class="btn" title="展开或收起维度标签面板">标签筛选</button>
+      <button id="multi-toggle" class="btn" title="多选影片后进入多屏播放">多屏播放</button>
+      <div class="grow"></div>
+      <label class="field">
+        <span>排序</span>
+        <select id="sort-select" class="select">
+          <option value="recent_added">最近添加</option>
+          <option value="title">标题</option>
+          <option value="year">年份</option>
+          <option value="rating">评分</option>
+          <option value="duration">时长</option>
+          <option value="last_watched">最近观看</option>
+        </select>
+      </label>
+      <div class="seg" id="size-group" role="group" aria-label="海报尺寸">
+        <button class="seg-btn" data-size="large">大</button>
+        <button class="seg-btn on" data-size="mid">中</button>
+        <button class="seg-btn" data-size="small">小</button>
+      </div>
+    </section>
+
+    <!-- 已选标签条：显示当前生效的标签，可单个移除或一键清空 -->
+    <div id="filter-bar" class="filter-bar hidden"></div>
+
+    <!-- 维度标签面板：维度与取值全部来自后端配置，新增维度无需改前端 -->
+    <div id="dims" class="dims hidden"></div>
+
+    <!-- 多选条（FR-06 进入方式）：勾选 2 部以上后进入多屏 -->
+    <div id="select-bar" class="select-bar hidden">
+      <span id="select-count" class="sb-count">已选 0 部</span>
+      <span class="sb-hint">选择 2 部以上影片，点「进入多屏」</span>
+      <div class="grow"></div>
+      <button id="select-enter" class="btn primary" disabled>进入多屏</button>
+      <button id="select-cancel" class="btn ghost">取消</button>
+    </div>
+
+    <!-- 多屏布局条（FR-06）：布局格位、同时播放上限、浏览库、退出 -->
+    <div id="multi-bar" class="multi-bar hidden">
+      <span class="mb-title">多屏播放</span>
+      <div id="layout-bar" class="layoutbar" role="group" aria-label="多屏布局"></div>
+      <div class="grow"></div>
+      <span id="multi-count" class="mb-count">0 路</span>
+      <label class="field">
+        <span>同时播放上限</span>
+        <select id="limit-select" class="select"></select>
+      </label>
+      <!-- 并发发声（默认关闭）：开启后多路同时出声，实时字幕也随之按格独立开启 -->
+      <label class="switch" title="开启后多路同时出声（不做自动压低）；关闭时只有发声窗口出声">
+        <input id="concurrent-audio" type="checkbox" />
+        <span>多路同时发声</span>
+      </label>
+      <button id="browse-btn" class="btn">浏览库</button>
+      <button id="exit-multi" class="btn">退出多屏</button>
+    </div>
+
+    <main id="wall" class="wall">
+      <div id="empty" class="empty">
+        <div class="empty-title">还没有内容</div>
+        <div class="empty-sub">在上方填入本地目录路径，点「添加目录」，再点「扫描入库」。</div>
+      </div>
+      <div id="grid" class="grid"></div>
+    </main>
+
+    <!-- 多屏格位舞台：每格由原生画面窗口覆盖 .screen-area，格内控制条留在下方可交互 -->
+    <div id="multi-stage" class="multi-stage hidden"></div>
+
+    <div id="sources" class="sources"></div>
+
+    <!-- 续播选择弹层 -->
+    <div id="resume-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3 id="resume-title">继续观看？</h3>
+        <p id="resume-desc" class="muted"></p>
+        <div class="modal-actions">
+          <button id="resume-continue" class="btn primary">继续观看</button>
+          <button id="resume-restart" class="btn">从头播放</button>
+          <button id="resume-cancel" class="btn ghost">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 退出多屏询问（FR-06）：必须由用户明确二选一，不设默认 -->
+    <div id="multi-exit-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>退出多屏播放</h3>
+        <p class="muted">请选择退出方式。</p>
+        <div class="modal-actions">
+          <button id="exit-keep" class="btn primary">保留进度并回到单路</button>
+          <button id="exit-stop" class="btn">全部停止</button>
+          <button id="exit-cancel" class="btn ghost">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 数据迁移（FR-07）：把一个目录作为导出包写出，或从导出包导入并合并 -->
+    <div id="data-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>数据迁移</h3>
+        <p class="muted">
+          导出会把用户标签、进度、收藏、设置与已生成字幕写成一个导出包；导入到新库后原样还原，
+          同一影片冲突时以本机数据为准，读不到的影片只标记「缺失」不丢弃。
+        </p>
+        <input
+          id="data-path"
+          class="dir-input"
+          type="text"
+          spellcheck="false"
+          placeholder="导出包目录，例如 D:\CinemaExport"
+        />
+        <div class="modal-actions">
+          <button id="data-export" class="btn primary">导出到此目录</button>
+          <button id="data-import" class="btn">从此目录导入</button>
+          <button id="data-cancel" class="btn ghost">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 联网导入（M7）：粘贴视频列表页 / 搜索页 URL，由 yt-dlp 枚举条目并缓存封面。
+         条目只登记「详情页地址」，点击时才实时解析流地址交给 mpv。 -->
+    <div id="online-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>联网导入</h3>
+        <p class="muted">
+          粘贴列表页 / 搜索页地址（每行一个），由 yt-dlp 解析出条目与封面：条目进入海报墙，
+          封面缓存在本机海报目录；点击条目即在线播放（播放时实时解析流地址）。
+          需要把 yt-dlp.exe 放在主程序同目录（或加入系统 PATH）。
+        </p>
+        <textarea
+          id="online-url"
+          class="online-url"
+          spellcheck="false"
+          rows="4"
+          placeholder="https://hanime1.me/search?genre=%E8%A3%8F%E7%95%AA"
+        ></textarea>
+        <div id="online-result" class="online-result muted"></div>
+        <div class="modal-actions">
+          <button id="online-import" class="btn primary">开始导入</button>
+          <button id="online-cancel" class="btn ghost">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 主机模式（Console）：可切换的大屏 / 键盘导航界面。默认关闭（硬约束 C6）。
+         播放时整层隐藏，让位后端原生画面窗口；悬停预览在多选 / 多屏 / 播放态下均不参与。
+         维度与取值仍全部来自后端，本层只做呈现与转发。 -->
+    <div id="console" class="console hidden">
+      <div class="c-top">
+        <div class="c-brand"><span class="mark">影</span><span class="name">影院</span></div>
+        <div class="grow"></div>
+        <span id="c-top-stats" class="c-stats">—</span>
+        <span id="c-clock" class="c-clock">--:--</span>
+        <button id="c-search-btn" class="c-icon" type="button" title="搜索（进入资源库）">搜索</button>
+        <button id="c-settings" class="c-icon" type="button" title="主机模式设置">设置</button>
+        <button id="c-to-classic" class="c-icon" type="button" title="回到经典界面（Esc）">经典界面</button>
+      </div>
+
+      <!-- 首页屏：最近观看 Hero + 封面卡行 + 分类胶囊行 + 宽幅卡行 -->
+      <div id="c-screen-home" class="c-screen">
+        <div id="c-hero" class="c-hero"></div>
+        <div class="c-row-wrap">
+          <div class="c-row-title">最近观看</div>
+          <div id="c-cover-row" class="c-row"></div>
+        </div>
+        <div id="c-chips" class="c-chips"></div>
+        <div class="c-row-wrap">
+          <div class="c-row-title">继续观看</div>
+          <div id="c-wide-row" class="c-row c-wide"></div>
+        </div>
+      </div>
+
+      <!-- 资源库屏：居中搜索框 + 筛选胶囊行 + 大幅海报网格 -->
+      <div id="c-screen-lib" class="c-screen hidden">
+        <div class="c-lib-top">
+          <input
+            id="c-search"
+            class="c-search"
+            type="text"
+            spellcheck="false"
+            placeholder="搜索标题 / 简介 / 标签名"
+          />
+        </div>
+        <div id="c-chips-lib" class="c-chips"></div>
+        <div id="c-grid" class="c-grid"></div>
+      </div>
+
+      <!-- 空状态：空库与「筛选无结果」两种文案分开（沿用 FR-03 不自动放宽条件） -->
+      <div id="c-empty" class="c-empty hidden"></div>
+
+      <div class="c-hint">
+        <span class="c-badge">影院 菜单</span>
+        <div class="grow"></div>
+        <span class="c-hint-item"><kbd>↑↓←→</kbd> 移动</span>
+        <span class="c-hint-item"><kbd>Enter</kbd> 确认</span>
+        <span class="c-hint-item"><kbd>Esc</kbd> 返回</span>
+        <span class="c-hint-item"><kbd>F10</kbd> 切换模式</span>
+      </div>
+
+      <!-- 主机模式设置浮层：只放安全的只读 / 布尔项；入库与数据迁移仍在经典界面完成 -->
+      <div id="c-settings-panel" class="c-settings hidden">
+        <div class="cs-head">
+          <span class="cs-title">主机模式设置</span>
+          <button id="c-settings-close" class="sm-x" type="button" title="收起">×</button>
+        </div>
+        <label class="switch cs-switch">
+          <input id="c-preview-toggle" type="checkbox" checked />
+          <span>悬停预览（经典界面生效）</span>
+        </label>
+        <div class="cs-row">
+          <span class="cs-label">海报尺寸</span>
+          <div class="seg" id="c-size-group" role="group" aria-label="海报尺寸">
+            <button type="button" class="seg-btn" data-size="large">大</button>
+            <button type="button" class="seg-btn on" data-size="mid">中</button>
+            <button type="button" class="seg-btn" data-size="small">小</button>
+          </div>
+        </div>
+        <p class="cs-note">
+          添加目录、扫描入库与数据迁移需要在经典界面完成（需要输入路径）。导播大屏只提供浏览与播放。
+        </p>
+        <button id="c-to-classic-2" class="btn primary cs-cta" type="button">回到经典界面</button>
+      </div>
+    </div>
+
+    <!-- 播放控制条：高度由后端 CONTROL_BAR_PX 换算，保证画面窗口恰好停在它上沿 -->
+    <div id="player-bar" class="player-bar hidden">
+      <div class="pb-title" id="pb-title">—</div>
+      <button id="pb-toggle" class="pb-btn" title="播放 / 暂停">暂停</button>
+      <input id="pb-seek" class="pb-seek" type="range" min="0" max="1000" step="1" value="0" />
+      <div class="pb-time" id="pb-time">00:00 / 00:00</div>
+      <button id="pb-subtitle" class="pb-btn" title="字幕菜单">字幕</button>
+      <button id="pb-sublive" class="pb-btn hidden" title="本片尚无字幕，可生成实时字幕">实时字幕</button>
+      <button id="pb-add-multi" class="pb-btn" title="把当前影片加入多屏播放">加入多屏</button>
+      <button id="pb-close" class="pb-btn" title="返回海报墙">返回</button>
+    </div>
+
+    <!-- 实时字幕叠层：贴在画面区域底部、控制条上方；原文 + 译文两行 -->
+    <div id="subtitle-overlay" class="subtitle-overlay hidden">
+      <div id="sub-origin" class="sub-line origin hidden"></div>
+      <div id="sub-translation" class="sub-line translation hidden"></div>
+    </div>
+
+    <!-- 字幕菜单：「字幕」入口常驻可用；「实时字幕」入口是否出现在控制栏由后端决定 -->
+    <div id="subtitle-menu" class="subtitle-menu hidden">
+      <div class="sm-head">
+        <span class="sm-title">字幕</span>
+        <span id="sm-state" class="sm-state">未开启</span>
+        <button id="sm-close" class="sm-x" type="button" title="收起">×</button>
+      </div>
+      <div id="sm-tracks" class="sm-tracks hidden"></div>
+      <div id="sm-notice" class="sm-notice hidden"></div>
+      <div class="sm-sub-title">实时字幕</div>
+      <div id="sm-queue" class="sm-queue hidden"></div>
+      <label class="sm-row">
+        <span class="sm-label">原声语种</span>
+        <select id="sm-origin-lang" class="select">
+          <option value="">自动判定</option>
+          <option value="zh">中文</option>
+          <option value="en">英语</option>
+          <option value="ja">日语</option>
+          <option value="ko">韩语</option>
+        </select>
+      </label>
+      <label class="sm-row">
+        <span class="sm-label">目标语言</span>
+        <select id="sm-target-lang" class="select">
+          <option value="zh-Hans">简体中文</option>
+          <option value="">不翻译（原声同语种）</option>
+        </select>
+      </label>
+      <div class="sm-row">
+        <span class="sm-label">呈现</span>
+        <div class="seg" id="sm-display-group" role="group" aria-label="字幕呈现">
+          <button type="button" class="seg-btn on" data-display="bilingual">原文+译文</button>
+          <button type="button" class="seg-btn" data-display="translationOnly">仅译文</button>
+          <button type="button" class="seg-btn" data-display="originOnly">仅原文</button>
+        </div>
+      </div>
+      <div class="sm-actions">
+        <button id="sm-start" class="btn primary" type="button">生成实时字幕</button>
+        <button id="sm-save" class="btn hidden" type="button">保存为字幕轨道</button>
+        <button id="sm-stop" class="btn ghost hidden" type="button">关闭实时字幕</button>
+      </div>
+    </div>
+
+    <!-- 实时字幕：隐私告知 / 失败三出口 / 外挂字幕加载（FR-05） -->
+    <div id="subtitle-privacy" class="modal hidden">
+      <div class="modal-card wide">
+        <h3>开启实时字幕</h3>
+        <p class="muted">实时字幕会在播放时识别音频。开启前请确认音频是否会离开本机：</p>
+        <div id="sub-privacy-note" class="sm-note"></div>
+        <div id="sub-engine-list" class="sub-engines"></div>
+        <p class="muted sm-hint">选择本地引擎即为「仅本地模式」：识别完全离线，音频不会离开本机。</p>
+        <div class="modal-actions">
+          <button id="sub-privacy-confirm" class="btn primary">确认开启</button>
+          <button id="sub-privacy-cancel" class="btn ghost">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="subtitle-failure" class="modal hidden">
+      <div class="modal-card wide">
+        <h3>实时字幕生成失败</h3>
+        <p id="sub-failure-desc" class="muted"></p>
+        <p class="muted">播放与界面不受影响，可继续观看。</p>
+        <div class="modal-actions">
+          <button id="sub-fail-external" class="btn primary">加载外挂字幕</button>
+          <button id="sub-fail-dictation" class="btn">仅做原文听写</button>
+          <button id="sub-fail-close" class="btn ghost">关闭实时字幕</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="subtitle-external" class="modal hidden">
+      <div class="modal-card wide">
+        <h3>加载外挂字幕</h3>
+        <p class="muted">请输入字幕文件的绝对路径（.srt）。</p>
+        <input
+          id="sub-external-path"
+          class="dir-input"
+          type="text"
+          spellcheck="false"
+          placeholder="例如 D:\Movies\影片名.srt"
+        />
+        <div class="modal-actions">
+          <button id="sub-external-confirm" class="btn primary">加载</button>
+          <button id="sub-external-cancel" class="btn ghost">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 悬停预览的信息层：预览不可用时在此标注原因（FR-02 / FR-06 三种降级态之一） -->
+    <div id="preview-note" class="preview-note hidden"></div>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

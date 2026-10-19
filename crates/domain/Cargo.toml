@@ -1,0 +1,7 @@
+[package]
+name = "cinema-domain"
+version.workspace = true
+edition.workspace = true
+
+# L2 领域层：纯逻辑，零 IO，因此不声明任何依赖。
+[dependencies]
