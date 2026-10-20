@@ -2558,6 +2558,100 @@ Copy-Item "D:\cm0\target\debug\cinema-asr.exe" "&lt;项目根&gt;\target\debug\c
             该源在 300s 内的后续重试不会重新抓取；超时后自然放行。</li>
         </ol>
       </div>
+
+      <h3>A.22 「跨设备项目维护：GitHub 私有仓 + 便携 git」实施与验证记录</h3>
+      <p>
+        触发是用户需求：<b>「目前这台是公司电脑，我家里也有一台电脑，如何跨设备项目维护这个项目」</b>。
+        本条记录远端形态、本机工具链、入库口径，以及<b>本机访问 GitHub 必须显式走本地代理</b>这一环境约束，
+        供换机与新会话直接复用。功能代码<b>未改动</b>，仅新增仓库元数据（<code>.gitignore</code>）。
+      </p>
+      <div class="meta-chips">
+        <span class="chip">记录日期 <b>2026-10-20</b></span>
+        <span class="chip">对应阶段 <b>工程化 / 跨设备维护 · 非 §10</b></span>
+        <span class="chip">验收依据 <b>附录 A.22（非 §10）</b></span>
+        <span class="chip">远端 <b>GitHub 私有仓 tianqibofangqi</b></span>
+      </div>
+
+      <h4>远端与本地仓库现状（已核对）</h4>
+      <ul>
+        <li><b>远端</b>：<code>https://github.com/AIbigfoot/tianqibofangqi</code>（私有）。
+          历史为 <code>bee85ea</code>（Initial commit，建仓时自动生成 README）→
+          <code>391df81</code>（项目 71 文件 / 38051 行）→ <code>1553bb8</code>（合并远端 README）。
+          因远端建仓时自带 README，直接推送会被判 <code>non-fast-forward</code>，
+          需先 <code>merge --allow-unrelated-histories</code> 再推；该 README 已保留。</li>
+        <li><b>提交身份</b>：<code>天奇 &lt;alexwang321@163.com&gt;</code>，逐条经
+          <code>git -c user.name / -c user.email</code> 传入，<b>不写入全局 git 配置</b>。</li>
+        <li><b>入库口径</b>：<code>.gitignore</code> 排除构建产物与运行时二进制——
+          <code>target</code>（4.9 GB）、<code>src-tauri\target</code>（527 MB）、<code>tmp</code>（134 MB）、
+          <code>src-tauri</code> 下的 <code>*.exe / *.dll</code>；实际入库 <b>71 文件 / 1.54 MB</b>
+          （<code>git status --short</code> 复核为 71 行）。</li>
+        <li><b>本机 git</b>：便携 <b>MinGit 2.47.1</b>，位置 <code>%LOCALAPPDATA%\MinGit\cmd\git.exe</code>，
+          免安装、未写入系统；自带 Git Credential Manager 与 <code>ssh</code>，
+          其 <code>etc\gitconfig</code> 默认 <code>credential.helper = manager</code>。</li>
+        <li><b>认证</b>：一次浏览器登录后凭证由 GCM 存入 Windows 凭证管理器，之后本机拉取/推送免密；
+          <b>无需令牌、无需 SSH 密钥</b>。</li>
+      </ul>
+
+      <h4>环境约束：本机 git 必须走本地代理</h4>
+      <div class="callout warn">
+        <span class="ct">关键约束（换机 / 新会话必读）</span>
+        <p>
+          本机已启用系统代理 <code>127.0.0.1:7890</code>（<code>ProxyEnable=1 ProxyServer=127.0.0.1:7890</code>），
+          但 <code>netsh winhttp show proxy</code> 为 <b>Direct</b>，且
+          <b>git 的 libcurl 不读取 WinINET 代理设置</b>，故未显式配置时直连会失败：
+          <code>fatal: unable to access 'https://github.com/…': Failed to connect to github.com port 443
+          after 21081 ms: Could not connect to server</code>（连续三次复现）。
+          实测 TCP 443：<code>github.com</code> <b>不通</b>；<code>gitee.com</code>、
+          <code>ssh.github.com</code>、<code>codeload.github.com</code> <b>可直连</b>。
+        </p>
+        <p>
+          <b>解决</b>：为本仓库写入本地代理配置——<code>http.proxy</code> 与 <code>https.proxy</code>
+          均设为 <code>http://127.0.0.1:7890</code>（仅 <code>--local</code>，<b>只影响本仓库、不入提交、不动全局配置</b>）。
+          写入后 <code>git fetch origin</code> 不带任何 <code>-c</code> 参数即静默成功（已验证）。
+          撤销：<code>git config --local --unset http.proxy</code>（<code>https.proxy</code> 同理）。
+        </p>
+      </div>
+
+      <h4>跨设备上手（家里那台电脑）</h4>
+      <ol>
+        <li><b>装环境</b>：<code>winget install --id Git.Git -e</code>；另需 Rust（rustup 稳定版，gnu 工具链）。</li>
+        <li><b>克隆到纯 ASCII 路径</b>：
+          <code>git clone https://github.com/AIbigfoot/tianqibofangqi.git D:\dev\cinema</code>。
+          <b>必须避开含中文的路径</b>——本项目此前在中文路径下需额外使用 ASCII 构建目录 + LLVM 工具链才能编译，
+          ASCII 路径可免掉这整套绕行；若家里 GitHub 直连同样不通，按上节加本地代理参数。</li>
+        <li><b>补运行时依赖（仓库内不含）</b>：<code>libmpv-2.dll</code>（115.3 MB）、
+          <code>yt-dlp.exe</code>（17 MB）、<code>WebView2Loader.dll</code>（0.2 MB）、
+          <code>cinema-asr.exe</code>（1.7 MB）须与主程序<b>同目录</b>；最省事是从公司机的
+          <code>target\release</code> 直接拷这 4 个文件（共约 158 MB）。
+          其中 <code>cinema-asr.exe</code> 亦可由源码构建：
+          <code>cargo build --release -p cinema-adapters --bin cinema-asr</code>。</li>
+        <li><b>构建</b>：<code>cd D:\dev\cinema</code> → <code>cargo build --release</code>
+          （ASCII 路径下无需 A.1 的 <code>CARGO_TARGET_DIR</code> / LLVM 绕行配方）。</li>
+        <li><b>数据不随仓库走</b>：观看进度、标签、收藏、封面缓存均在<b>各机各自的</b>
+          <code>%LOCALAPPDATA%\Cinema</code>；跨机搬库走应用内「数据迁移 → 导出/导入」，
+          <b>不要</b>直接拷贝该目录（含 SQLite WAL 文件，运行中拷贝会损坏）。</li>
+        <li><b>日常纪律</b>：改代码前 <code>git pull</code>，收工 <code>git commit</code> + <code>git push</code>；
+          不要用 OneDrive / 坚果云直接同步项目目录（会把 GB 级构建缓存一并同步并产生冲突）。</li>
+      </ol>
+
+      <div class="callout warn">
+        <span class="ct">已知限制</span>
+        <ol style="margin:8px 0 0 18px">
+          <li><b>沙箱内无法自助安装 git</b>：<code>winget</code> 因禁止写入其 <code>DiagOutputDir</code> 被拦截
+            （即使按用户授权关闭沙箱文件限制仍生效）；下载无哈希校验的外部二进制被安全策略明确拒绝且不得变通绕过。
+            最终由<b>用户明确授权</b>后下载官方免安装 MinGit 包（仅解压，不装系统）完成。</li>
+          <li><b>GitHub 连接器无建仓权限</b>：补授权后重试仍为 <code>403 Resource not accessible by integration</code>，
+            私有仓须由用户在网页创建；连接器可用于<b>只读核对</b>
+            （本轮据此确认远端 8 个顶层项与 3 条提交）。</li>
+          <li><b>代理是运行期依赖</b>：本机代理进程未运行时，git 的拉取与推送都会失败；
+            若长期在公司机使用，可考虑把代理参数固化到本仓库本地配置（已做），或改用可直连的 Gitee 远端
+            （<code>gitee.com:443</code> 实测可直连）。</li>
+          <li><b>运行时二进制不入库</b>：<code>libmpv-2.dll</code> / <code>yt-dlp.exe</code> /
+            <code>WebView2Loader.dll</code> 因体积与分发许可不随仓库走，换机必须另行补齐，
+            否则播放与联网抓取不可用。</li>
+          <li><b>派生缓存不随库迁移</b>：封面等派生文件换机后由启动自愈按源补抓（见 A.21）。</li>
+        </ol>
+      </div>
     </section>
 
     <footer>
