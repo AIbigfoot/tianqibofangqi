@@ -23,13 +23,14 @@ const DPR = window.devicePixelRatio || 1;
 
 const els = {};
 [
-  'dir-input', 'dir-browse', 'add-btn', 'scan-btn', 'data-btn', 'online-btn', 'preview-toggle', 'stats',
+  'add-btn', 'data-btn', 'online-btn', 'manage-btn', 'preview-toggle', 'stats',
+  'manage-modal', 'manage-list', 'manage-close',
   'data-modal', 'data-path', 'data-export', 'data-import', 'data-cancel',
   'scan-overlay', 'scan-title', 'scan-bar-fill', 'scan-detail', 'scan-current', 'scan-cancel',
   'online-modal', 'online-url', 'online-import', 'online-cancel', 'online-result',
   'searchbar', 'search-input', 'filter-toggle', 'multi-toggle', 'sort-select', 'size-group', 'filter-bar', 'dims',
   'wall', 'empty', 'grid', 'sources',
-  'select-bar', 'select-count', 'select-enter', 'select-cancel',
+  'select-bar', 'select-count', 'select-all', 'select-enter', 'select-remove', 'select-cancel',
   'multi-bar', 'layout-bar', 'multi-count', 'limit-select', 'concurrent-audio', 'browse-btn', 'exit-multi', 'multi-stage',
   'multi-exit-modal', 'exit-keep', 'exit-stop', 'exit-cancel',
   'resume-modal', 'resume-title', 'resume-desc', 'resume-continue', 'resume-restart', 'resume-cancel',
@@ -388,7 +389,7 @@ function renderEmpty() {
   if (!hasQuery()) {
     els.empty.appendChild(el('div', 'empty-title', '还没有内容'));
     els.empty.appendChild(
-      el('div', 'empty-sub', '在上方点「浏览…」选择本地目录，点「添加目录」，再点「扫描入库」。'),
+      el('div', 'empty-sub', '在上方点「添加目录」选择文件夹，确认后会自动扫描该目录入库。'),
     );
     return;
   }
@@ -851,11 +852,11 @@ async function closePlayer() {
 // ---------------------------------------------------------------------------
 
 // 文件夹选择：由 tauri-plugin-dialog 提供原生对话框，用户直接选目录而不必复制粘贴路径。
-// 插件未就绪（或非 Tauri 环境）时返回 null，调用方回退到手动输入。
+// 插件未就绪（或非 Tauri 环境）时返回 null，调用方放弃本次操作。
 async function pickFolder(title) {
   const dialog = TAURI && TAURI.dialog;
   if (!dialog || typeof dialog.open !== 'function') {
-    showToast('当前环境不支持文件夹选择，请手动填写目录路径');
+    showToast('当前环境不支持文件夹选择');
     return null;
   }
   try {
@@ -871,30 +872,48 @@ async function pickFolder(title) {
   }
 }
 
-// 「浏览…」：选出目录后只回填输入框，交由用户确认后再点「添加目录」。
-async function browseDir() {
-  const picked = await pickFolder('选择要入库的本地目录');
-  if (picked) {
-    els['dir-input'].value = picked;
-  }
+// 盘根判定：`E:` / `E:\` 都算「整个磁盘」。选中盘根会扫描该盘上所有文件夹（含系统目录），
+// 既慢又会把无关视频混进库里，所以入库前必须让用户确认一次。
+function isDriveRoot(path) {
+  return /^[A-Za-z]:(\\|\/)?$/.test(String(path).trim());
 }
 
-async function addSource() {
-  let path = els['dir-input'].value.trim();
-  if (!path) {
-    // 路径为空时直接弹系统文件夹选择器：用户只需点路径所在的文件夹即可
-    path = await pickFolder('选择要入库的本地目录');
-    if (!path) {
-      return;
+/** 二次确认：优先用系统对话框，插件不可用时退回浏览器确认框。 */
+async function confirmDialog(title, message) {
+  const dialog = TAURI && TAURI.dialog;
+  if (dialog && typeof dialog.ask === 'function') {
+    try {
+      return await dialog.ask({ title, kind: 'warning', message });
+    } catch (err) {
+      /* 对话框不可用时退回浏览器确认框 */
     }
-    els['dir-input'].value = path;
+  }
+  return window.confirm(message);
+}
+
+async function confirmWholeDrive(path) {
+  return confirmDialog(
+    '扫描整个磁盘？',
+    `你选择的是整个磁盘 ${path}，将扫描该盘上的全部文件夹，可能非常慢。确定继续吗？`,
+  );
+}
+
+// 「添加目录」是唯一的入库入口：点按钮 → 系统文件夹选择器 → 确认后先入库该目录，
+// 再只扫描这一个源。不再提供独立的「扫描入库」（那会把库里所有源（含旧的整盘源）
+// 一起重扫，用户看到的却是「怎么又在扫整个磁盘」）。
+async function addSource() {
+  const path = await pickFolder('选择要入库的本地目录');
+  if (!path) {
+    return; // 用户取消选择：什么都不做
+  }
+  if (isDriveRoot(path) && !(await confirmWholeDrive(path))) {
+    return;
   }
   els['add-btn'].disabled = true;
   try {
-    await invoke('add_local_source', { path });
-    els['dir-input'].value = '';
+    const source = await invoke('add_local_source', { path });
     await refreshSources();
-    showToast('已添加目录，点「扫描入库」开始导入');
+    await scanSource(source);
   } catch (err) {
     showToast(String(err));
   } finally {
@@ -969,55 +988,111 @@ async function cancelScan() {
   }
 }
 
-async function scanAll() {
-  els['scan-btn'].disabled = true;
+// 扫描单个源（自动扫描与后续重扫共用同一条路径）。
+async function scanSource(source) {
+  if (!source) {
+    return;
+  }
   openScanOverlay();
+  scanTargetName = source.name;
   // 先挂监听再发命令：后端在命令入口就会推第一条进度，晚了会丢掉这次起点
   const unlisten = listen
     ? await listen('scan-progress', (event) => renderScanProgress(event.payload))
     : null;
   try {
-    const sources = await invoke('list_sources');
-    if (!sources.length) {
-      showToast('先添加一个本地目录');
-      return;
-    }
-    let stored = 0;
-    let skipped = 0;
-    let failed = 0;
-    let cancelled = false;
-    for (const source of sources) {
-      scanTargetName = source.name;
-      try {
-        const report = await invoke('scan_source', { id: source.id });
-        stored += report.stored;
-        skipped += report.skipped || 0;
-        if (report.cancelled) {
-          // 取消后不再扫下一个源：用户要的是「停下来」，不是「换个源继续」
-          cancelled = true;
-          break;
-        }
-      } catch (err) {
-        failed += 1;
-        showToast(`${source.name} 扫描失败：${err}`);
-      }
-    }
-    if (cancelled) {
-      showToast(`已取消扫描：本次入库 ${stored} 条`);
-    } else if (!failed) {
-      showToast(`扫描完成：共 ${stored} 条${skipped ? `，跳过 ${skipped} 项` : ''}`);
+    const report = await invoke('scan_source', { id: source.id });
+    if (report.cancelled) {
+      showToast(`已取消扫描：本次入库 ${report.stored} 条`);
+    } else {
+      showToast(
+        `${source.name} 扫描完成：入库 ${report.stored} 条` +
+          (report.skipped ? `，跳过 ${report.skipped} 项` : ''),
+      );
     }
     await refresh();
     // 入库会生成派生标签（时长区间 / 画质 / 字幕状态），取值清单随之变化
     await reloadFilters();
   } catch (err) {
-    showToast(String(err));
+    showToast(`${source.name} 扫描失败：${err}`);
   } finally {
     if (unlisten) {
       unlisten();
     }
     closeScanOverlay();
-    els['scan-btn'].disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 库管理：按源查看条目数并整源清除（只删库内记录，不删硬盘文件）
+// ---------------------------------------------------------------------------
+
+async function openManageModal() {
+  els['manage-list'].replaceChildren();
+  els['manage-modal'].classList.remove('hidden');
+  await renderManageList();
+}
+
+function hideManageModal() {
+  els['manage-modal'].classList.add('hidden');
+}
+
+async function renderManageList() {
+  let list = [];
+  try {
+    list = await invoke('list_sources');
+  } catch (err) {
+    showToast(String(err));
+    return;
+  }
+  els['manage-list'].replaceChildren();
+  if (!list.length) {
+    els['manage-list'].textContent = '尚未添加媒体源';
+    return;
+  }
+  for (const source of list) {
+    const row = document.createElement('div');
+    row.className = 'manage-row';
+
+    const info = document.createElement('div');
+    info.className = 'manage-info';
+    const name = document.createElement('div');
+    name.className = 'manage-name';
+    name.textContent = `${source.name} · ${source.itemCount} 条`;
+    const path = document.createElement('div');
+    path.className = 'manage-path';
+    path.textContent = source.location;
+    info.append(name, path);
+
+    const clear = document.createElement('button');
+    clear.className = 'btn';
+    clear.textContent = '清除';
+    clear.disabled = !source.itemCount;
+    clear.title = '删除该源在库内的全部条目与源登记，不删除硬盘文件';
+    clear.addEventListener('click', () => clearSource(source));
+    row.append(info, clear);
+    els['manage-list'].appendChild(row);
+  }
+}
+
+/** 整源清除：源登记与条目一起从库中移除，硬盘文件原样保留。 */
+async function clearSource(source) {
+  const count = source.itemCount || 0;
+  const ok = await confirmDialog(
+    '清除整个媒体源？',
+    `将从库中清除「${source.name}」及它的 ${count} 条记录（含进度、标签关联与搜索索引）。\n` +
+      `硬盘上的视频文件不会被删除：${source.location}\n确定继续吗？`,
+  );
+  if (!ok) {
+    return;
+  }
+  try {
+    const removed = await invoke('clear_source', { id: source.id });
+    await renderManageList();
+    await refresh();
+    await reloadFilters();
+    showToast(`已清除「${source.name}」的 ${removed} 条记录（视频文件保留在原处）`);
+  } catch (err) {
+    showToast(String(err));
   }
 }
 
@@ -1999,19 +2074,59 @@ function toggleSelect(item) {
   if (at >= 0) {
     selectedIds.splice(at, 1);
   } else {
-    if (selectedIds.length >= MULTI_MAX_SELECT) {
-      showToast(`最多同时播放 ${MULTI_MAX_SELECT} 路，请先取消部分选择`);
-      return;
-    }
+    // 选择不再按多屏路数拦截：批量清除需要能勾选任意数量，
+    // 「进入多屏」由按钮可用性把 4 路上限挡在启动前（见 renderSelectBar）。
     selectedIds.push(item.id);
   }
   renderGrid();
   renderSelectBar();
 }
 
+/** 全选当前筛选结果：批量清除时不必逐个点。 */
+function selectAllCards() {
+  selectedIds = items.filter((item) => !item.missing).map((item) => item.id);
+  renderGrid();
+  renderSelectBar();
+}
+
+/**
+ * 批量清除所选条目的入库记录。
+ *
+ * **只删库内记录，不删硬盘视频文件**（后端 `remove_items` 的边界）；
+ * 进度、标签关联、字幕登记随条目级联清除，这里不做二次加工。
+ */
+async function removeSelected() {
+  if (!selectedIds.length) {
+    return;
+  }
+  const count = selectedIds.length;
+  if (!(await confirmDialog(
+    '清除入库记录',
+    `将从库中清除所选 ${count} 部影片的记录（含进度与标签关联）。\n硬盘上的视频文件不会被删除，可随时重新扫描入库。确定继续吗？`,
+  ))) {
+    return;
+  }
+  els['select-remove'].disabled = true;
+  try {
+    const removed = await invoke('remove_items', { ids: selectedIds.slice() });
+    exitSelectMode();
+    await refresh();
+    // 条目消失后，依赖条目存在的派生标签取值也要重算
+    await reloadFilters();
+    showToast(`已清除 ${removed} 条入库记录（视频文件保留在原处）`);
+  } catch (err) {
+    showToast(String(err));
+  } finally {
+    els['select-remove'].disabled = selectedIds.length === 0;
+  }
+}
+
 function renderSelectBar() {
   els['select-count'].textContent = `已选 ${selectedIds.length} 部`;
-  els['select-enter'].disabled = selectedIds.length < 2;
+  // 进入多屏仍受解码额度限制（MULTI_MAX_SELECT 路），超限时按钮直接不可用，
+  // 而不是勾到第 5 部才弹提示——多选本身要为批量清除放开数量。
+  els['select-enter'].disabled = selectedIds.length < 2 || selectedIds.length > MULTI_MAX_SELECT;
+  els['select-remove'].disabled = selectedIds.length === 0;
   els['multi-toggle'].classList.toggle('primary', selectMode);
 }
 
@@ -3225,7 +3340,7 @@ function renderConsoleEmpty(home) {
   if (home && !consoleData.length) {
     box.appendChild(el('div', 'empty-title', '还没有内容'));
     box.appendChild(
-      el('div', 'empty-sub', '主机模式只提供浏览与播放；请回到经典界面填入本地目录并「扫描入库」。'),
+      el('div', 'empty-sub', '主机模式只提供浏览与播放；请回到经典界面点「添加目录」选择文件夹。'),
     );
     const actions = el('div', 'empty-actions');
     const back = el('button', 'btn primary', '回到经典界面');
@@ -3539,15 +3654,11 @@ async function init() {
   // 控制条按后端物理像素预留，这里换算成 CSS 像素以精确对齐画面窗口下沿
   document.documentElement.style.setProperty('--bar-h', `${constants.controlBarPx / DPR}px`);
 
-  els['dir-browse'].addEventListener('click', browseDir);
   els['add-btn'].addEventListener('click', addSource);
-  els['scan-btn'].addEventListener('click', scanAll);
   els['scan-cancel'].addEventListener('click', cancelScan);
-  els['dir-input'].addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      addSource();
-    }
-  });
+  // 库管理：按源列条目数并整源清除（只删库内记录，不删硬盘文件）
+  els['manage-btn'].addEventListener('click', openManageModal);
+  els['manage-close'].addEventListener('click', hideManageModal);
   // 数据迁移（FR-07）：导出为包 / 从包导入
   els['data-btn'].addEventListener('click', openDataModal);
   els['data-export'].addEventListener('click', exportLibrary);
@@ -3628,7 +3739,9 @@ async function init() {
 
   // 多屏播放（PRD FR-06）：进入/退出多选态、进入/退出多屏、布局与上限、退出二选一
   els['multi-toggle'].addEventListener('click', toggleSelectMode);
+  els['select-all'].addEventListener('click', selectAllCards);
   els['select-enter'].addEventListener('click', enterMulti);
+  els['select-remove'].addEventListener('click', removeSelected);
   els['select-cancel'].addEventListener('click', exitSelectMode);
   els['browse-btn'].addEventListener('click', browseLibrary);
   els['exit-multi'].addEventListener('click', openMultiExit);

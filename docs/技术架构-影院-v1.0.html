@@ -2832,6 +2832,138 @@ Copy-Item "D:\cm0\target\debug\cinema-asr.exe" "&lt;项目根&gt;\target\debug\c
           旧源的条目会被外键级联移除，属于预期行为。
         </p>
       </div>
+      <h3>A.25 「添加目录即自动扫描：入库入口收敛为单按钮」实施与验证记录</h3>
+      <p>
+        触发是用户反馈：<b>「扫描入库功能不好，经常把整个磁盘扫描了，理论上只要有一个添加目录按钮就行了，
+        添加好自动扫描，点击添加入库弹出浏览框，确认后进行扫描」</b>。
+        本条记录根因、前端改动、整盘保护与验证结果。<b>后端命令与 L1/L2/L3/L4 均未改动</b>。
+      </p>
+      <div class="meta-chips">
+        <span class="chip">记录日期 <b>2026-10-20</b></span>
+        <span class="chip">对应阶段 <b>M1 入库 FR-01 · 交互收敛</b></span>
+        <span class="chip">验收依据 <b>附录 A.25（非 §10）</b></span>
+        <span class="chip">改动面 <b>仅 ui/index.html + ui/app.js</b></span>
+      </div>
+
+      <h4>根因取证</h4>
+      <ul>
+        <li><b>「整盘扫描」的来源是源本身是盘根</b>：库中确有
+          <code>location = E:\</code> 的源（另有 <code>E:\AAA历史250</code>）。
+          源是盘根时，扫描自然覆盖整盘——这不是扫描器越界，而是入库的目录选成了盘。</li>
+        <li><b>旧交互放大了它</b>：顶栏原为「路径输入框 + 浏览… + 添加目录 + 扫描入库」四件套，
+          且 <code>scanAll()</code> 会<b>遍历库里所有源</b>逐个 <code>scan_source</code>。
+          于是只要库里有那条盘根源，「扫描入库」每次都把整盘重扫一遍，
+          用户感知就是「点一次就把整个磁盘扫了」。</li>
+      </ul>
+
+      <h4>实现方式（只改前端两个文件）</h4>
+      <ul>
+        <li><b>入口收敛</b>：顶栏只留一个「添加目录」按钮（<code>#add-btn</code>），
+          删除 <code>#dir-input</code> / <code>#dir-browse</code> / <code>#scan-btn</code> 及其
+          <code>els</code> 登记、事件绑定与 Enter 提交。</li>
+        <li><b>一气呵成</b>：<code>addSource()</code> = 系统文件夹选择器
+          （<code>tauri-plugin-dialog</code>，标题「选择要入库的本地目录」）→
+          <code>add_local_source</code> → <code>refreshSources()</code> → 立即
+          <code>scanSource(source)</code>。用户取消选择则什么都不做。</li>
+        <li><b>只扫新增目录</b>：原 <code>scanAll()</code>（遍历全部源）改为
+          <code>scanSource(source)</code>（只扫传入的那一个源），进度浮层、取消、
+          <code>refresh()</code> 与 <code>reloadFilters()</code> 逻辑原样保留——
+          因此旧的盘根源<b>不会再被自动重扫</b>。</li>
+        <li><b>整盘保护</b>：新增 <code>isDriveRoot()</code>（<code>E:</code> 与 <code>E:\</code> 均判为盘根）
+          与 <code>confirmWholeDrive()</code>；选中盘根时用
+          <code>dialog.ask({kind:'warning'})</code> 二次确认（插件不可用时退回
+          <code>window.confirm</code>），取消则不入库。取整不取巧：不拦截盘根，
+          因为「整盘入库」本身可以是合法诉求，只是不能是<b>手滑</b>。</li>
+        <li><b>文案同步</b>：空状态、主机模式空状态与导播大屏说明里
+          「浏览… / 添加目录 / 扫描入库」的旧三步指引，全部改为「点『添加目录』选择文件夹，
+          确认后自动扫描该目录入库」。</li>
+      </ul>
+
+      <h4>验证结果（2026-10-20）</h4>
+      <ul>
+        <li><b>构建</b>：<code>cargo build --release</code>（<code>src-tauri</code>）exit 0，27.33s；
+          前端资源在构建期嵌入 exe，改完必须重建才生效（沿用 A.24 的配方）。</li>
+        <li><b>UI 端到端</b>：顶栏仅「添加目录 / 数据迁移 / 联网导入」；
+          点「添加目录」弹出标题为「选择要入库的本地目录」的系统对话框；
+          选中 <code>D:\dev\cinema_scan_test</code>（内含 <code>sub\a.mp4</code> 与 <code>b.mkv</code>）
+          后<b>无需再点任何按钮</b>即出现扫描浮层；结束提示入库 2 条，
+          源数与条目数各 +2，底栏新增该源；对同一目录重复添加为幂等（源、条目均不重复）。</li>
+        <li><b>整盘保护</b>：选择盘根会先弹警告确认框，选「否」不入库（代码路径：
+          <code>isDriveRoot</code> 正则 <code>^[A-Za-z]:(\\|/)?$</code>）。</li>
+        <li><b>清理</b>：验证产生的测试源与 2 条测试条目已从库中移除（外键级联 + FTS 同步），
+          <code>D:\dev\cinema_scan_test</code> 已删除，不留残留数据。</li>
+      </ul>
+
+      <div class="callout warn">
+        <span class="ct">已污染的整盘旧源仍需用户手动作业</span>
+        <p>
+          本次改动只保证「新增目录只扫该目录」，不会改写库中已存在的
+          <code>location = E:\</code> 那条源，也不会删除它已入库的条目。
+          当前界面<b>尚无移除媒体源</b>的入口；如需清掉整盘源的条目，
+          需要另行新增「移除源」（L4 已有 <code>MediaSourceRepo::remove</code>，
+          条目由外键级联删除），待用户确认后再做。
+          <b>此入口已在 A.26 补齐</b>（「库管理」整源清除 + 海报墙多选清除）。
+        </p>
+      </div>
+
+      <h3>A.26 「批量清除入库记录：库管理整源清除 + 海报墙多选清除」实施与验证记录</h3>
+      <p>
+        触发是用户反馈：<b>「目前只有添加没有清除，需要有批量清除，不是删除视频文件」</b>。
+        经确认粒度为「两者都要」：既能<b>按源整源清除</b>，也能在<b>海报墙勾选清除</b>；
+        两条路径都<b>只删库内记录，绝不删除硬盘视频文件</b>。
+      </p>
+      <div class="meta-chips">
+        <span class="chip">记录日期 <b>2026-10-20</b></span>
+        <span class="chip">对应阶段 <b>M1 入库 FR-01 · 库维护</b></span>
+        <span class="chip">验收依据 <b>附录 A.26（非 §10）</b></span>
+        <span class="chip">改动面 <b>ui ×3 + 组合根 + L4 仓储</b></span>
+      </div>
+
+      <h4>实现方式</h4>
+      <ul>
+        <li><b>L4 仓储</b>：新增 <code>MediaItemRepo::remove_many</code>（同事务内删
+          <code>item_fts</code> 索引行与 <code>media_item</code>，返回实际删除条数）与
+          <code>count_by_source</code>；<code>MediaSourceRepo::remove</code> 改为
+          <b>先清该源条目的 FTS 行、再删源</b>并返回删除条数。
+          <code>item_fts</code> 是独立 FTS5 表（无触发器级联），必须显式同步删除，
+          否则搜索仍会命中已清除条目。进度、标签关联、字幕登记由
+          <code>ON DELETE CASCADE</code> 自动清理。</li>
+        <li><b>组合根</b>：新增 <code>remove_items(ids)</code>、<code>clear_source(id)</code>
+          两个 async 命令（<code>spawn_blocking</code> 内走上述仓储）；
+          <code>SourceView</code> 增 <code>item_count</code> 字段供「库管理」展示影响面。</li>
+        <li><b>库管理弹窗</b>：顶栏「库管理」列出每个源的名称、条目数与路径，
+          每行「清除」→ 原生确认框（文案明确「硬盘上的视频文件不会被删除：&lt;路径&gt;」）
+          → <code>clear_source</code> → 刷新列表、海报墙与标签清单。</li>
+        <li><b>多选清除</b>：多选态新增「全选」「清除所选」；<code>toggleSelect</code>
+          不再按多屏 4 路上限拦截勾选（上限改由「进入多屏」按钮禁用逻辑表达），
+          因此可勾选任意数量做批量清除。</li>
+      </ul>
+
+      <h4>验证结果（2026-10-20）</h4>
+      <ul>
+        <li><b>构建/测试</b>：<code>cargo build --release</code> 通过；
+          <code>cargo test --workspace</code> 全绿。</li>
+        <li><b>UI 端到端</b>（隔离数据目录 <code>D:\dev\cinema\.e2e\data</code>）：
+          入库 <code>lib-a</code>（3 条）与 <code>lib-b</code>（2 条）后，
+          「库管理」显示「lib-a · 3 条 / lib-b · 2 条」且清除按钮可用；
+          清除 lib-b 后列表只剩 lib-a，Toast「已清除「lib-b」的 2 条记录（视频文件保留在原处）」，
+          顶栏变为「源 1 · 条目 3」；随后「多选 → 全选（已选 3 部）→ 清除所选」
+          → 海报墙归空并显示「还没有内容」。</li>
+        <li><b>文件完好性</b>：操作后 <code>lib-a</code>（3 个）与 <code>lib-b</code>（2 个）
+          假视频文件全部原样保留，字节数未变——证明清除只动库内记录。</li>
+      </ul>
+
+      <div class="callout warn">
+        <span class="ct">排查记录：整源列表曾整块空白</span>
+        <p>
+          首版 <code>renderManageList()</code> 里写的是未声明的
+          <code>sources = Array.isArray(list) ? list : []</code>，
+          而页面恰有 <code>id="sources"</code> 的底栏元素，
+          <code>window.sources</code> 是浏览器为元素 id 生成的只读命名属性，
+          赋值抛异常导致弹窗列表整块空白（无 Toast、无报错文字）。
+          改为函数内局部 <code>list</code> 后修复。
+        </p>
+      </div>
     </section>
 
     <footer>

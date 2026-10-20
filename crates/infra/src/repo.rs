@@ -179,14 +179,21 @@ impl MediaSourceRepo {
         Ok(found.flatten())
     }
 
-    /// 移除源。条目由外键 `ON DELETE CASCADE` 一并移除；
-    /// 「保留用户数据并标记文件缺失」的路径由 L1 决定，不在仓储内隐式处理。
-    pub fn remove(conn: &Connection, id: &SourceId) -> Result<()> {
-        conn.execute(
-            "DELETE FROM media_source WHERE id = ?1",
+    /// 移除源及其全部条目（库内记录），返回被清掉的条目数。
+    ///
+    /// 条目由外键 `ON DELETE CASCADE` 一并移除；`item_fts` 没有触发器，
+    /// 因此先按源删索引、再删源，并放在同一事务里。
+    /// **只删库内记录，不动磁盘文件**。「保留用户数据并标记文件缺失」的路径由 L1 决定，
+    /// 不在仓储内隐式处理。
+    pub fn remove(conn: &Connection, id: &SourceId) -> Result<usize> {
+        let tx = conn.unchecked_transaction()?;
+        let items = tx.execute(
+            "DELETE FROM item_fts WHERE item_id IN (SELECT id FROM media_item WHERE source_id = ?1)",
             params![id.as_str()],
         )?;
-        Ok(())
+        tx.execute("DELETE FROM media_source WHERE id = ?1", params![id.as_str()])?;
+        tx.commit()?;
+        Ok(items)
     }
 }
 
@@ -356,6 +363,39 @@ impl MediaItemRepo {
     pub fn count(conn: &Connection) -> Result<u64> {
         let n: i64 = conn.query_row("SELECT count(*) FROM media_item", params![], |row| row.get(0))?;
         Ok(n as u64)
+    }
+
+    /// 某源下的条目数（「库管理」列源时展示，也让用户判断清除的影响面）。
+    pub fn count_by_source(conn: &Connection, source_id: &SourceId) -> Result<u64> {
+        let n: i64 = conn.query_row(
+            "SELECT count(*) FROM media_item WHERE source_id = ?1",
+            params![source_id.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 批量移除条目，返回实际删除的条数。
+    ///
+    /// **只删库内记录，绝不动磁盘文件**——这是「清除入库」与「删除视频」的分界线。
+    /// `item_fts` 是独立的 FTS5 表（没有触发器随条目级联），必须同批删除，
+    /// 否则搜索仍会命中已清除的条目。整批放在一个事务里：中途失败不留半截数据。
+    pub fn remove_many(conn: &Connection, ids: &[ItemId]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let tx = conn.unchecked_transaction()?;
+        let mut removed = 0usize;
+        {
+            let mut del_index = tx.prepare("DELETE FROM item_fts WHERE item_id = ?1")?;
+            let mut del_item = tx.prepare("DELETE FROM media_item WHERE id = ?1")?;
+            for id in ids {
+                del_index.execute(params![id.as_str()])?;
+                removed += del_item.execute(params![id.as_str()])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 }
 

@@ -133,6 +133,8 @@ struct SourceView {
     name: String,
     location: String,
     state: String,
+    /// 该源当前入库的条目数（「库管理」据此展示清除的影响面）。
+    item_count: u64,
     /// 最近一次扫描失败的原因（PRD FR-01 异常表）。无失败时为 `None`。
     last_error: Option<String>,
 }
@@ -944,6 +946,8 @@ fn add_local_source(state: State<'_, AppState>, path: String) -> std::result::Re
         name: src.name,
         location: src.location,
         state: "idle".into(),
+        // 刚登记的源还没扫描，条目数一定是 0（扫描完成后前端会重新拉清单）
+        item_count: 0,
         last_error: None,
     })
 }
@@ -969,6 +973,8 @@ fn list_sources(state: State<'_, AppState>) -> std::result::Result<Vec<SourceVie
                 SourceState::ScanFailed => "scan_failed",
             }
             .into(),
+            item_count: MediaItemRepo::count_by_source(db.conn(), &s.id)
+                .map_err(|e| e.to_string())?,
             last_error,
         });
     }
@@ -1035,6 +1041,54 @@ async fn scan_source(
 #[tauri::command]
 fn cancel_scan(state: State<'_, AppState>) {
     state.scan_cancel.store(true, Ordering::SeqCst);
+}
+
+/// 批量清除入库记录（海报墙「清除所选」）。
+///
+/// **只删库内的条目记录，绝不删除磁盘上的视频文件**；进度、标签关联、字幕登记
+/// 等随条目级联清除，搜索索引同批清理（见 `MediaItemRepo::remove_many`）。
+/// 返回实际清除的条数。
+///
+/// **必须 async + `spawn_blocking`**：一次「全选清除」可能涉及上万条记录，
+/// 同步命令跑在主线程会把界面卡住（与 `scan_source` 同一条理由）。
+#[tauri::command]
+async fn remove_items(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> std::result::Result<usize, String> {
+    let items: Vec<ItemId> = ids.into_iter().map(ItemId::from).collect();
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let db = Arc::clone(&state.db);
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        MediaItemRepo::remove_many(db.conn(), &items).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("清除任务异常中止：{e}"))?
+}
+
+/// 清除某个媒体源及其全部入库记录（「库管理」的整源清除）。
+///
+/// 与 [`remove_items`] 同一条边界：**只删库内记录，不动磁盘文件**。
+/// 源被一并移除，底部源条不再出现；需要时再点「添加目录」重新入库即可。
+#[tauri::command]
+async fn clear_source(state: State<'_, AppState>, id: String) -> std::result::Result<usize, String> {
+    let db = Arc::clone(&state.db);
+    let source_id = SourceId::from(id);
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        if MediaSourceRepo::get(db.conn(), &source_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err(format!("媒体源不存在：{}", source_id.as_str()));
+        }
+        MediaSourceRepo::remove(db.conn(), &source_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("清除任务异常中止：{e}"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -2242,6 +2296,8 @@ fn main() {
             set_paused,
             seek,
             close_player,
+            remove_items,
+            clear_source,
             start_preview,
             stop_preview,
             set_preview_enabled,

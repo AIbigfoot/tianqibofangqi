@@ -11,18 +11,12 @@
     <header id="topbar" class="topbar">
       <div class="brand"><span class="mark">影</span><span class="name">影院</span></div>
       <div class="adder">
-        <input
-          id="dir-input"
-          class="dir-input"
-          type="text"
-          spellcheck="false"
-          placeholder="本地目录绝对路径，或点「浏览…」选择，例如 D:\Movies"
-        />
-        <button id="dir-browse" class="btn" title="浏览本机文件夹并填入路径">浏览…</button>
-        <button id="add-btn" class="btn primary">添加目录</button>
-        <button id="scan-btn" class="btn">扫描入库</button>
+        <button id="add-btn" class="btn primary" title="选择本机文件夹，确认后自动扫描该目录入库">
+          添加目录
+        </button>
         <button id="data-btn" class="btn" title="导出 / 导入库（迁移到其它机器）">数据迁移</button>
         <button id="online-btn" class="btn" title="粘贴列表页 URL，联网导入在线视频与封面">联网导入</button>
+        <button id="manage-btn" class="btn" title="查看媒体源并批量清除库内条目（不删除硬盘文件）">库管理</button>
       </div>
       <button id="console-btn" class="btn" title="主机模式：大屏 + 键盘导航（F10 切换）">主机模式</button>
       <label class="switch" title="关闭后悬停只显示信息层，不自动播放预览">
@@ -42,7 +36,7 @@
         placeholder="搜索标题 / 简介 / 标签名"
       />
       <button id="filter-toggle" class="btn" title="展开或收起维度标签面板">标签筛选</button>
-      <button id="multi-toggle" class="btn" title="多选影片后进入多屏播放">多屏播放</button>
+      <button id="multi-toggle" class="btn" title="勾选影片：2 部以上可进入多屏播放，或批量清除入库记录">多选</button>
       <div class="grow"></div>
       <label class="field">
         <span>排序</span>
@@ -68,12 +62,14 @@
     <!-- 维度标签面板：维度与取值全部来自后端配置，新增维度无需改前端 -->
     <div id="dims" class="dims hidden"></div>
 
-    <!-- 多选条（FR-06 进入方式）：勾选 2 部以上后进入多屏 -->
+    <!-- 多选条（FR-06 进入方式 / 批量清除）：2 部以上可进入多屏，任意数量可清除入库记录 -->
     <div id="select-bar" class="select-bar hidden">
       <span id="select-count" class="sb-count">已选 0 部</span>
-      <span class="sb-hint">选择 2 部以上影片，点「进入多屏」</span>
+      <span class="sb-hint">选择 2 部以上影片，点「进入多屏」；「清除所选」只删库内记录，不删视频文件</span>
       <div class="grow"></div>
+      <button id="select-all" class="btn">全选</button>
       <button id="select-enter" class="btn primary" disabled>进入多屏</button>
+      <button id="select-remove" class="btn" disabled>清除所选</button>
       <button id="select-cancel" class="btn ghost">取消</button>
     </div>
 
@@ -99,7 +95,7 @@
     <main id="wall" class="wall">
       <div id="empty" class="empty">
         <div class="empty-title">还没有内容</div>
-        <div class="empty-sub">在上方点「浏览…」选择本地目录，点「添加目录」，再点「扫描入库」。</div>
+        <div class="empty-sub">在上方点「添加目录」选择文件夹，确认后会自动扫描该目录入库。</div>
       </div>
       <div id="grid" class="grid"></div>
     </main>
@@ -154,6 +150,22 @@
           <button id="data-export" class="btn primary">导出到此目录</button>
           <button id="data-import" class="btn">从此目录导入</button>
           <button id="data-cancel" class="btn ghost">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 库管理：列出媒体源与条目数，可整源清除（只删库内记录，不删硬盘文件） -->
+    <div id="manage-modal" class="modal hidden">
+      <div class="modal-card wide">
+        <h3>库管理</h3>
+        <p class="muted">
+          下面每一条是入库过的媒体源及其条目数。「清除」会删除该源在库里的全部条目
+          （含进度、标签关联与搜索索引），<b>不会删除硬盘上的视频文件</b>；
+          需要时再点「添加目录」重新入库即可。
+        </p>
+        <div id="manage-list" class="manage-list"></div>
+        <div class="modal-actions">
+          <button id="manage-close" class="btn ghost">关闭</button>
         </div>
       </div>
     </div>
@@ -257,7 +269,7 @@
           </div>
         </div>
         <p class="cs-note">
-          添加目录、扫描入库与数据迁移需要在经典界面完成（需要输入路径）。导播大屏只提供浏览与播放。
+          添加目录与数据迁移需要在经典界面完成。导播大屏只提供浏览与播放。
         </p>
         <button id="c-to-classic-2" class="btn primary cs-cta" type="button">回到经典界面</button>
       </div>

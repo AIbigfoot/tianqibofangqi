@@ -549,6 +549,22 @@ body { display: flex; flex-direction: column; }
 .modal-card .dir-input { width: 100%; margin: 4px 0 16px; }
 .sm-hint { margin: 4px 0 14px; }
 
+/* ---------- 库管理（批量清除） ---------- */
+
+.manage-list { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; }
+.manage-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-soft);
+}
+.manage-info { min-width: 0; flex: 1; }
+.manage-name { font-size: 12.5px; color: var(--txt); }
+.manage-path {
+  margin-top: 2px; font-size: 11px; color: var(--txt-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.manage-row .btn { flex: none; }
+
 /* ---------- 多屏播放（FR-06） ---------- */
 
 /* 多选条：勾选海报后出现在检索区与海报墙之间 */
