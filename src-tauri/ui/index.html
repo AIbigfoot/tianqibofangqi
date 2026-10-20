@@ -373,6 +373,20 @@
     <!-- 悬停预览的信息层：预览不可用时在此标注原因（FR-02 / FR-06 三种降级态之一） -->
     <div id="preview-note" class="preview-note hidden"></div>
 
+    <!-- 扫描进度浮层（FR-01）：长扫描既要看得见，也要能中止。
+         刻意不做全屏遮罩——扫描期间用户仍可浏览影片墙。 -->
+    <div id="scan-overlay" class="scan-overlay hidden">
+      <div class="scan-card">
+        <h3 id="scan-title">正在扫描</h3>
+        <div class="scan-bar"><div id="scan-bar-fill" class="scan-bar-fill"></div></div>
+        <p id="scan-detail" class="scan-detail"></p>
+        <p id="scan-current" class="scan-current"></p>
+        <div class="modal-actions">
+          <button id="scan-cancel" class="btn ghost">取消扫描</button>
+        </div>
+      </div>
+    </div>
+
     <div id="toast" class="toast hidden"></div>
 
     <script src="app.js"></script>

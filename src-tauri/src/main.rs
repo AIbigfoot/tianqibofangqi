@@ -15,25 +15,28 @@ mod store;
 mod subtitle;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use cinema_adapters::media_source::{DirectUrlProvider, LanPathProvider, LocalFolderProvider};
+use cinema_adapters::media_source::{
+    normalize_local_root, DirectUrlProvider, LanPathProvider, LocalFolderProvider,
+};
 use cinema_adapters::mpv::MpvProber;
 use cinema_adapters::online_site::{DownloadRegistry, DownloadState, OnlineSiteProvider};
 use cinema_adapters::player::MpvPlayerCore;
 use cinema_app::decode_quota::DecodeQuota;
-use cinema_app::import_service::ImportService;
+use cinema_app::import_service::{ImportService, ScanControl, ScanReporter};
 use cinema_app::playback_service::{PlaybackService, PreviewRequest};
 use cinema_app::portability_service::PortabilityService;
 use cinema_app::progress_service::ProgressService;
 use cinema_app::search_service::{SearchQuery, SearchService, SearchStore};
 use cinema_domain::error::{PortError, Result as PortResult};
 use cinema_domain::model::{
-    ItemId, MediaItem, MediaSource, PlayableRef, PlayerCmd, PlayerEvent, Progress, SourceId,
-    SourceKind, SourceState, StreamFacts, TrackSelection,
+    ItemId, MediaItem, MediaSource, PlayableRef, PlayerCmd, PlayerEvent, Progress, ScanProgress,
+    ScanStage, SourceId, SourceKind, SourceState, StreamFacts, TrackSelection,
 };
 use cinema_domain::ports::media_source::MediaSourceProvider;
 use cinema_domain::ports::player::PlayerCore;
@@ -115,6 +118,8 @@ struct AppState {
     downloads: Arc<DownloadRegistry>,
     /// 正在后台抓列表页封面的在线源（源 id → 开始时间），避免同一源被反复抓取。
     covers_inflight: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// 当前扫描的取消位。界面点「取消」置位，扫描就地收尾（见 `cancel_scan`）。
+    scan_cancel: Arc<AtomicBool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +174,66 @@ struct ImportReportView {
     discovered: u64,
     stored: u64,
     probed: u64,
+    /// 不可读 / 主动避开而跳过的目录与条目数。
+    skipped: u64,
+    /// 是否被用户取消（取消不算失败，已入库条目保留）。
+    cancelled: bool,
+}
+
+/// 扫描进度事件（`scan-progress`）的载荷。
+///
+/// 时间与总数由 L1/L3 计算，本层只做搬运与序列化：界面拿到的就是「扫描到哪了」。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ScanProgressView {
+    /// 正在扫描的源 id（一次扫描只对应一个源）。
+    source_id: String,
+    /// `discovering` | `probing`。
+    stage: String,
+    dirs_scanned: u64,
+    files_seen: u64,
+    discovered: u64,
+    skipped: u64,
+    probe_current: u64,
+    probe_total: u64,
+    /// 当前正在处理的路径（探测阶段为条目标题）。
+    current: Option<String>,
+    cancelled: bool,
+}
+
+impl ScanProgressView {
+    fn new(source_id: &str, progress: &ScanProgress) -> Self {
+        Self {
+            source_id: source_id.to_owned(),
+            stage: match progress.stage {
+                ScanStage::Discovering => "discovering",
+                ScanStage::Probing => "probing",
+            }
+            .into(),
+            dirs_scanned: progress.dirs_scanned,
+            files_seen: progress.files_seen,
+            discovered: progress.discovered,
+            skipped: progress.skipped,
+            probe_current: progress.probe_current,
+            probe_total: progress.probe_total,
+            current: progress.current.clone(),
+            cancelled: progress.cancelled,
+        }
+    }
+}
+
+/// 把入库编排上报的进度转成前端事件。
+struct EmitScanReporter {
+    app: AppHandle,
+    source_id: String,
+}
+
+impl ScanReporter for EmitScanReporter {
+    fn report(&self, progress: &ScanProgress) {
+        let _ = self
+            .app
+            .emit("scan-progress", ScanProgressView::new(&self.source_id, progress));
+    }
 }
 
 /// 检索区提交的查询：文本 + 维度筛选 + 排序。
@@ -849,7 +914,9 @@ fn multi_view(state: &AppState) -> MultiScreenView {
 
 #[tauri::command]
 fn add_local_source(state: State<'_, AppState>, path: String) -> std::result::Result<SourceView, String> {
-    let path = path.trim().to_string();
+    // 裸盘符（`D:`）是相对路径，存的、扫的都会变成「进程当前目录」而不是盘根：
+    // 入库前归一为 `D:\`，让用户看见的、扫描用的、播放拼回的始终是同一个路径
+    let path = normalize_local_root(&path);
     if path.is_empty() {
         return Err("请填写本地目录路径".into());
     }
@@ -908,8 +975,18 @@ fn list_sources(state: State<'_, AppState>) -> std::result::Result<Vec<SourceVie
     Ok(out)
 }
 
+/// 扫描入库一个源。
+///
+/// **必须 async + `spawn_blocking`**：扫描是纯磁盘 IO（逐目录 `read_dir` + 逐文件
+/// 探测时长），耗时随目录树规模线性增长。Tauri 的同步命令跑在主线程上，一条
+/// 「整块硬盘」的源会把界面冻死到扫描结束——这与 PRD「扫描期间可见进度」相冲突。
+///
+/// 进度经 `scan-progress` 事件推给前端；用户可随时用 `cancel_scan` 中止。
 #[tauri::command]
-fn scan_source(state: State<'_, AppState>, id: String) -> std::result::Result<ImportReportView, String> {
+async fn scan_source(
+    state: State<'_, AppState>,
+    id: String,
+) -> std::result::Result<ImportReportView, String> {
     let src = {
         let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
         MediaSourceRepo::get(db.conn(), &SourceId::from(id.clone()))
@@ -917,16 +994,47 @@ fn scan_source(state: State<'_, AppState>, id: String) -> std::result::Result<Im
             .ok_or_else(|| format!("媒体源不存在：{id}"))?
     };
 
-    let provider = provider_for(&src, state.prober.as_ref(), &state.downloads)
-        .map_err(|e| e.reason().to_string())?;
-    let report = ImportService::import(state.store.as_ref(), provider.as_ref(), &src)
-        .map_err(|e| e.reason().to_string())?;
+    // 每次扫描从干净的取消位开始：上一次的取消不应影响这一次
+    let cancel = Arc::clone(&state.scan_cancel);
+    cancel.store(false, Ordering::SeqCst);
 
-    Ok(ImportReportView {
-        discovered: report.stat.discovered,
-        stored: report.stored,
-        probed: report.probed,
+    let store = Arc::clone(&state.store);
+    let prober = state.prober.clone();
+    let downloads = Arc::clone(&state.downloads);
+    let reporter: Arc<dyn ScanReporter> = Arc::new(EmitScanReporter {
+        app: state.app.clone(),
+        source_id: src.id.as_str().to_string(),
+    });
+
+    // 开跑先报一次「0 进度」：大目录树要几秒才会读到第一个子目录，
+    // 界面需要立刻知道「已经开始了」，而不是盯着按钮猜
+    reporter.report(&ScanProgress::default());
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let provider = provider_for(&src, prober.as_ref(), &downloads)
+            .map_err(|e| e.reason().to_string())?;
+        let control = ScanControl {
+            reporter: Some(reporter),
+            cancel: Some(cancel),
+        };
+        let report = ImportService::import_with(store.as_ref(), provider.as_ref(), &src, &control)
+            .map_err(|e| e.reason().to_string())?;
+        Ok::<ImportReportView, String>(ImportReportView {
+            discovered: report.stat.discovered,
+            stored: report.stored,
+            probed: report.probed,
+            skipped: report.stat.skipped,
+            cancelled: report.cancelled,
+        })
     })
+    .await
+    .map_err(|e| format!("扫描任务异常中止：{e}"))?
+}
+
+/// 请求中止当前扫描。已入库的条目保留，源不会被置为「扫描失败」。
+#[tauri::command]
+fn cancel_scan(state: State<'_, AppState>) {
+    state.scan_cancel.store(true, Ordering::SeqCst);
 }
 
 // ---------------------------------------------------------------------------
@@ -2040,6 +2148,8 @@ fn main() {
                 subtitles: Mutex::new(subtitle::SubtitleRuntime::new()),
                 downloads: Arc::new(DownloadRegistry::new()),
                 covers_inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                // 与本次会话的扫描一一对应；`scan_source` 每次开跑都会先清零
+                scan_cancel: Arc::new(AtomicBool::new(false)),
             });
 
             // 【启动自愈】在线源的封面是「懒抓」的：启动时检查一遍，
@@ -2072,6 +2182,24 @@ fn main() {
                 }
             }
 
+            // 【启动自愈】上一次运行若在扫描中途退出（关窗 / 崩溃），源会永远停在
+            // `scanning`，界面一直转圈——而进度浮层只属于本会话。扫描不是可跨会话续跑
+            // 的任务，因此启动时把遗留的 `scanning` 复位为 `idle`。
+            {
+                let state = app.state::<AppState>();
+                let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+                let sources = MediaSourceRepo::list(db.conn()).map_err(|e| e.to_string())?;
+                for s in sources.iter().filter(|s| s.state == SourceState::Scanning) {
+                    MediaSourceRepo::set_scan_result(
+                        db.conn(),
+                        &s.id,
+                        SourceState::Idle,
+                        cinema_infra::now_ms(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+
             // 窗口尺寸变化：单路播放时画面重新贴合（控制条高度始终留出）；
             // 多屏每格的矩形由前端按布局重新上报（`multi_place`）。
             let handle = app.handle().clone();
@@ -2100,6 +2228,7 @@ fn main() {
             add_local_source,
             list_sources,
             scan_source,
+            cancel_scan,
             online_import,
             item_cover,
             export_library,

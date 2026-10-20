@@ -13,11 +13,12 @@
 //! 导入期只做入库与标签归集，时长留待播放时按需解析。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use cinema_domain::error::{PortError, Result};
 use cinema_domain::model::{
-    DiscoverStat, DiscoveredItem, ItemId, MediaItem, MediaSource, SourceId, SourceKind, SourceState,
+    DiscoverStat, DiscoveredItem, ItemId, MediaItem, MediaSource, ScanProgress, ScanStage, SourceId,
+    SourceKind, SourceState,
 };
 use cinema_domain::ports::media_source::{DiscoverSink, MediaSourceProvider};
 use cinema_domain::tagging::{
@@ -25,6 +26,26 @@ use cinema_domain::tagging::{
 };
 
 use crate::tag_service::{apply_derived, builtin_derivers, TagStore};
+
+/// 扫描进度的出口。L0 的实现把进度转成前端事件；测试的实现可以直接记录。
+///
+/// 放在 L1 而不是直接让 L4 依赖 Tauri：入库编排只认「进度出口」这个窄接口，
+/// 谁来接、接到哪去由组合根决定（架构 §9 单向依赖）。
+pub trait ScanReporter: Send + Sync {
+    fn report(&self, progress: &ScanProgress);
+}
+
+/// 一次扫描的外部控制：进度出口 + 取消位。
+///
+/// 两者都可缺省（`Default`）：缺省即 M1 的行为——不报进度、不可取消，
+/// 因此既有调用点与测试无需改动即可继续工作。
+#[derive(Default, Clone)]
+pub struct ScanControl {
+    /// 进度出口。`None` 表示不上报。
+    pub reporter: Option<Arc<dyn ScanReporter>>,
+    /// 取消位。与 L0 共享同一个原子标志：界面点「取消」后，扫描就地收尾。
+    pub cancel: Option<Arc<AtomicBool>>,
+}
 
 /// L1 入库所需的持久化能力。
 pub trait ImportStore: TagStore + Send + Sync {
@@ -52,19 +73,21 @@ pub trait ImportStore: TagStore + Send + Sync {
 /// 一次扫描入库的结果回执。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ImportReport {
-    /// 提供者提交的候选项统计（含取消标记）。
+    /// 提供者提交的候选项统计（含取消标记与跳过计数）。
     pub stat: DiscoverStat,
     /// 实际落库的条目数（含已存在的合并条目）。
     pub stored: u64,
     /// 本次新探明时长的条目数。
     pub probed: u64,
+    /// 是否被用户取消。取消不是失败：已入库条目保留，源不会被置为 `scan_failed`。
+    pub cancelled: bool,
 }
 
 /// 扫描入库编排。
 pub struct ImportService;
 
 impl ImportService {
-    /// 对一个源执行一次扫描入库。
+    /// 对一个源执行一次扫描入库（不报进度、不可取消）。
     ///
     /// 失败隔离（PRD FR-01）：某源扫描失败只把**该源**置为 `scan_failed`，
     /// 其他源与已入库条目不受影响；因此错误向上抛，但不做任何全局回滚。
@@ -73,9 +96,32 @@ impl ImportService {
         provider: &dyn MediaSourceProvider,
         src: &MediaSource,
     ) -> Result<ImportReport> {
+        Self::import_with(store, provider, src, &ScanControl::default())
+    }
+
+    /// 同上，但带进度上报与取消位（界面长扫描用）。
+    ///
+    /// **收尾不变式**：无论成功、取消还是失败，流程结束时源一定不再处于 `scanning`，
+    /// 界面不会一直停在「扫描中」。
+    pub fn import_with(
+        store: &dyn ImportStore,
+        provider: &dyn MediaSourceProvider,
+        src: &MediaSource,
+        control: &ScanControl,
+    ) -> Result<ImportReport> {
         store.set_source_state(&src.id, SourceState::Scanning)?;
 
-        let sink = DbSink::new(store, src);
+        // 取消位始终持有一份 `Arc`：未由外部提供时内部自建，等价于「永不取消」
+        let cancel = control
+            .cancel
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let sink = DbSink::new(
+            store,
+            src,
+            control.reporter.clone(),
+            Arc::clone(&cancel),
+        );
         let stat = match provider.discover(src, &sink) {
             Ok(stat) => stat,
             Err(err) => {
@@ -92,10 +138,39 @@ impl ImportService {
         // 在线站点源整体跳过该环节（见模块文档：每条解析要联网数秒）
         let probe_during_import = src.kind != SourceKind::OnlineSite;
         let mut probed = 0u64;
-        for item in &stored {
-            if !probe_during_import || item.duration_ms.is_some() {
-                continue;
+
+        // 待探测集合先算出来：既作为「第几条 / 共几条」的分母，也避免每轮重复过滤
+        let probe_targets: Vec<&MediaItem> = if probe_during_import {
+            stored
+                .iter()
+                .filter(|item| item.duration_ms.is_none())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let probe_total = probe_targets.len() as u64;
+
+        let reporter = control.reporter.as_ref();
+        let mut cancelled = stat.cancelled;
+        for (index, item) in probe_targets.iter().enumerate() {
+            // 取消发生在探测中途时，已探明的条目保留，剩下的留待下次
+            if cancel.load(Ordering::SeqCst) {
+                cancelled = true;
+                break;
             }
+            if let Some(reporter) = reporter {
+                reporter.report(&ScanProgress {
+                    stage: ScanStage::Probing,
+                    probe_current: index as u64 + 1,
+                    probe_total,
+                    discovered: stored.len() as u64,
+                    skipped: stat.skipped,
+                    current: Some(item.title.clone()),
+                    cancelled: false,
+                    ..ScanProgress::default()
+                });
+            }
+
             let Ok(ref_) = provider.open(item) else {
                 continue;
             };
@@ -122,6 +197,18 @@ impl ImportService {
             store.reindex_item(&item.id)?;
         }
 
+        if cancelled {
+            // 取消是「用户主动中止」，不是失败：清除上一次的失败原因并回到 idle
+            store.set_source_error(&src.id, None)?;
+            store.set_source_state(&src.id, SourceState::Idle)?;
+            return Ok(ImportReport {
+                stat,
+                stored: stored.len() as u64,
+                probed,
+                cancelled: true,
+            });
+        }
+
         // 扫描成功：清除上一次的失败原因，避免界面残留过期的诊断信息
         store.set_source_error(&src.id, None)?;
         store.set_source_state(&src.id, SourceState::Idle)?;
@@ -129,6 +216,7 @@ impl ImportService {
             stat,
             stored: stored.len() as u64,
             probed,
+            cancelled: false,
         })
     }
 }
@@ -138,16 +226,25 @@ struct DbSink<'a> {
     store: &'a dyn ImportStore,
     src: &'a MediaSource,
     stored: Mutex<Vec<MediaItem>>,
-    cancelled: AtomicBool,
+    /// 取消位：与调用方共享的同一个原子标志。
+    cancel: Arc<AtomicBool>,
+    /// 进度出口；`None` 表示不上报（沿用 M1 行为）。
+    reporter: Option<Arc<dyn ScanReporter>>,
 }
 
 impl<'a> DbSink<'a> {
-    fn new(store: &'a dyn ImportStore, src: &'a MediaSource) -> Self {
+    fn new(
+        store: &'a dyn ImportStore,
+        src: &'a MediaSource,
+        reporter: Option<Arc<dyn ScanReporter>>,
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             store,
             src,
             stored: Mutex::new(Vec::new()),
-            cancelled: AtomicBool::new(false),
+            cancel,
+            reporter,
         }
     }
 
@@ -200,10 +297,23 @@ impl DiscoverSink for DbSink<'_> {
         Ok(())
     }
 
-    /// M1 的扫描由用户手动触发且时长可控，暂无取消入口；端口仍要求可取消，
-    /// 因此保留该位并在需要时由上层置位（算法不变）。
+    /// 取消位由调用方（组合根）持有并置位；未提供时无人置位，等价于不可取消。
     fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    /// 转发发现阶段的进度：落库条数以本层为准——提供者只知道「提交成功」，
+    /// 而「重扫合并到既有行」这件事只有落库方看得见。
+    fn progress(&self, progress: &ScanProgress) {
+        let Some(reporter) = self.reporter.as_ref() else {
+            return;
+        };
+        let stored = self.stored.lock().map(|s| s.len() as u64).unwrap_or(0);
+        reporter.report(&ScanProgress {
+            discovered: stored,
+            cancelled: self.is_cancelled(),
+            ..progress.clone()
+        });
     }
 }
 
@@ -612,6 +722,122 @@ mod tests {
             watch_writes("it-1"),
             1,
             "重扫不得再写观看状态，避免把「在看 / 已看」回退成「未看」"
+        );
+    }
+
+    /// 记录进度的假出口：测试据此断言「什么时候报了哪个阶段」。
+    #[derive(Default)]
+    struct RecordingReporter {
+        reports: Mutex<Vec<ScanProgress>>,
+    }
+
+    impl RecordingReporter {
+        fn reports(&self) -> Vec<ScanProgress> {
+            self.reports.lock().expect("锁不可中毒").clone()
+        }
+    }
+
+    impl ScanReporter for RecordingReporter {
+        fn report(&self, progress: &ScanProgress) {
+            self.reports
+                .lock()
+                .expect("锁不可中毒")
+                .push(progress.clone());
+        }
+    }
+
+    #[test]
+    fn scan_reports_discovery_then_probe_progress() {
+        let dir = temp_media_dir("progress");
+        let store = FakeStore::default();
+        let provider = DurationProvider {
+            inner: LocalFolderProvider::new(&dir),
+            duration_ms: 600_000,
+            calls: AtomicUsize::new(0),
+        };
+        let recorder = Arc::new(RecordingReporter::default());
+        let reporter: Arc<dyn ScanReporter> = recorder.clone();
+        let control = ScanControl {
+            reporter: Some(reporter),
+            cancel: None,
+        };
+
+        let report = ImportService::import_with(
+            &store,
+            &provider,
+            &local_source(&dir.to_string_lossy()),
+            &control,
+        )
+        .expect("扫描应成功");
+
+        let reports = recorder.reports();
+        assert!(!reports.is_empty(), "必须上报进度，界面才有东西可显示");
+        assert_eq!(
+            reports[0].stage,
+            ScanStage::Discovering,
+            "第一次上报必须是发现阶段"
+        );
+
+        let probing: Vec<&ScanProgress> = reports
+            .iter()
+            .filter(|p| p.stage == ScanStage::Probing)
+            .collect();
+        assert_eq!(probing.len(), 2, "逐个探测：两条新条目各报一次");
+        assert_eq!(probing[0].probe_current, 1);
+        assert_eq!(probing[1].probe_current, 2);
+        assert_eq!(probing[1].probe_total, 2, "分母是本次待探测总数");
+        assert!(
+            probing[1].current.is_some(),
+            "探测阶段要告诉用户正在处理哪一条"
+        );
+        assert_eq!(
+            reports.last().map(|p| p.stage),
+            Some(ScanStage::Probing),
+            "最后一条上报应停在探测阶段"
+        );
+        assert!(!report.cancelled, "未取消的扫描不得标记为取消");
+    }
+
+    #[test]
+    fn cancelled_scan_keeps_source_idle_and_stores_nothing() {
+        let dir = temp_media_dir("cancel");
+        let store = FakeStore::default();
+        let provider = DurationProvider {
+            inner: LocalFolderProvider::new(&dir),
+            duration_ms: 600_000,
+            calls: AtomicUsize::new(0),
+        };
+        // 取消位在开跑前就置位：发现阶段的第一次检查即中止
+        let cancel = Arc::new(AtomicBool::new(true));
+        let control = ScanControl {
+            reporter: None,
+            cancel: Some(Arc::clone(&cancel)),
+        };
+
+        let report = ImportService::import_with(
+            &store,
+            &provider,
+            &local_source(&dir.to_string_lossy()),
+            &control,
+        )
+        .expect("取消不是失败，仍应正常返回");
+
+        assert!(report.cancelled, "必须如实标记为已取消");
+        assert_eq!(report.stored, 0, "取消后不该留下条目");
+        assert_eq!(
+            store.states.lock().unwrap().as_slice(),
+            [SourceState::Scanning, SourceState::Idle],
+            "取消必须收尾回 idle，界面不能一直停在「扫描中」"
+        );
+        assert_eq!(
+            store.errors.lock().unwrap().as_slice(),
+            [None],
+            "取消不是失败，不得写入失败原因"
+        );
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            0,
+            "取消后不该再打开文件"
         );
     }
 }

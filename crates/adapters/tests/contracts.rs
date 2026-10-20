@@ -14,8 +14,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use cinema_adapters::media_source::{
-    normalized_lan_root, DirectUrlProvider, EmptyMediaSourceProvider, LanPathProvider,
-    LocalFolderProvider,
+    normalize_local_root, normalized_lan_root, DirectUrlProvider, EmptyMediaSourceProvider,
+    LanPathProvider, LocalFolderProvider,
 };
 use cinema_adapters::metadata::{EmptyMetadataProvider, FileNameMetadataProvider};
 use cinema_adapters::player::{MpvPlayerCore, NullPlayerCore};
@@ -245,6 +245,80 @@ fn p01_local_folder_resolves_absolute_path_from_root() {
         root.join("sub").join("clip.mp4"),
         "open 必须把相对路径拼成根目录下的绝对路径，否则磁盘上的文件根本打不开"
     );
+}
+
+/// 造一棵临时目录树并返回根：`sub/a.mp4`、`b.mkv`、`notes.txt`（后者非视频）。
+fn temp_tree(tag: &str) -> PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let root = std::env::temp_dir().join(format!("cinema-contract-{tag}-{unique}"));
+    std::fs::create_dir_all(root.join("sub")).expect("建临时目录");
+    for path in ["sub/a.mp4", "b.mkv", "notes.txt"] {
+        std::fs::write(root.join(path), b"x").expect("写样本文件");
+    }
+    root
+}
+
+#[test]
+fn p01_local_folder_discovers_nested_videos() {
+    let root = temp_tree("nested");
+    let sink = CollectSink::new(false);
+    let stat = LocalFolderProvider::new(root.as_path())
+        .discover(&local_source(&root.to_string_lossy()), &sink)
+        .expect("扫描应成功");
+
+    assert_eq!(stat.discovered, 2, "必须递归进子目录，只收视频文件");
+    assert_eq!(stat.skipped, 0, "正常目录树不该有跳过项");
+    let keys: Vec<String> = sink.items().iter().map(|i| i.stable_key.clone()).collect();
+    assert!(
+        keys.iter().any(|k| k.ends_with("sub/a.mp4")),
+        "子目录里的视频必须被发现，且相对路径用 / 分隔：{keys:?}"
+    );
+}
+
+/// 「不跟随链接」：自引用链接若被跟随会导致无限递归，因此必须跳过。
+///
+/// 创建符号链接需要权限（管理员或开发者模式），无权限时本用例**跳过**：
+/// 环境限制不该被记成实现缺陷。
+#[cfg(windows)]
+#[test]
+fn p01_local_folder_does_not_follow_directory_symlinks() {
+    use std::os::windows::fs::symlink_dir;
+
+    let root = temp_tree("symlink");
+    let outside = temp_tree("symlink-outside");
+    if symlink_dir(&outside, root.join("link")).is_err() {
+        return;
+    }
+
+    let sink = CollectSink::new(false);
+    let stat = LocalFolderProvider::new(root.as_path())
+        .discover(&local_source(&root.to_string_lossy()), &sink)
+        .expect("扫描应成功");
+
+    assert_eq!(
+        stat.discovered, 2,
+        "链接指向外部的视频不得被收录，只有根本身的两个视频"
+    );
+    assert_eq!(stat.skipped, 1, "被避开的链接应计入 skipped，便于界面如实告知");
+}
+
+#[test]
+fn p01_local_root_normalizes_bare_drive_letter() {
+    assert_eq!(
+        normalize_local_root("D:"),
+        r"D:\",
+        "裸盘符是相对路径，必须归一为盘根：否则扫的是进程当前目录"
+    );
+    assert_eq!(
+        normalize_local_root("  d:  "),
+        r"d:\",
+        "两端空白应被忽略；只归一裸盘符这一种形态"
+    );
+    assert_eq!(normalize_local_root(r"D:\Movies"), r"D:\Movies", "已含盘根的原样保留");
+    assert_eq!(normalize_local_root(""), "", "空串不得被伪造成盘根");
 }
 
 #[test]

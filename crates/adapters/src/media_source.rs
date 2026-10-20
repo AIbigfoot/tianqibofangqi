@@ -5,11 +5,15 @@ use std::sync::Arc;
 
 use cinema_domain::error::{PortError, Result};
 use cinema_domain::model::{
-    DiscoverStat, DiscoveredItem, MediaItem, MediaSource, PlayableRef, SourceKind, StreamFacts,
+    DiscoverStat, DiscoveredItem, MediaItem, MediaSource, PlayableRef, ScanProgress, ScanStage,
+    SourceKind, StreamFacts,
 };
 use cinema_domain::ports::media_source::{DiscoverSink, MediaSourceProvider};
 
 use crate::mpv::MpvProber;
+
+/// 进度上报的最小间隔：目录树可能上万层，逐条上报会把 IPC 打满。
+const REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// 可被识别的视频扩展名。
 const VIDEO_EXTENSIONS: &[&str] = &[
@@ -56,7 +60,7 @@ impl LocalFolderProvider {
     /// 以某个目录为根创建提供者（不探测时长）。
     pub fn new(root: &Path) -> Self {
         Self {
-            root: root.to_path_buf(),
+            root: PathBuf::from(normalize_local_root(&root.to_string_lossy())),
             prober: None,
         }
     }
@@ -66,7 +70,7 @@ impl LocalFolderProvider {
     /// 「续播」与「悬停预览可用性」都依赖时长，因此真实入库路径应使用本构造器。
     pub fn with_prober(root: &Path, prober: Arc<MpvProber>) -> Self {
         Self {
-            root: root.to_path_buf(),
+            root: PathBuf::from(normalize_local_root(&root.to_string_lossy())),
             prober: Some(prober),
         }
     }
@@ -83,7 +87,9 @@ impl MediaSourceProvider for LocalFolderProvider {
     }
 
     fn discover(&self, src: &MediaSource, sink: &dyn DiscoverSink) -> Result<DiscoverStat> {
-        discover_video_tree(Path::new(&src.location), src, sink)
+        // 用提供者自己的根（而非 `src.location`）：`open` 也用它拼回绝对路径，
+        // 两者必须是同一份归一化结果，否则「扫出来的」与「放得出来的」会指向不同目录
+        discover_video_tree(&self.root, src, sink)
     }
 
     fn open(&self, item: &MediaItem) -> Result<PlayableRef> {
@@ -244,15 +250,36 @@ pub fn normalized_lan_root(location: &str) -> String {
         Some(rest) => rest,
         None => match raw.strip_prefix("//") {
             Some(rest) => rest,
-            None => return raw.to_owned(),
+            None => return normalize_local_root(raw),
         },
     };
     let body = rest.trim_matches('/').replace('/', "\\");
     format!("\\\\{body}")
 }
 
+/// 把本地目录写法归一：裸盘符 `D:` → `D:\`，其余原样返回。
+///
+/// 裸盘符在 Windows 上是**相对**路径（`D:` 指「D 盘的当前目录」，随进程工作目录而变），
+/// `D:\` 才是盘根。用户从资源管理器复制路径时若被截成 `D:`，`read_dir("D:")` 实际扫的是
+/// 进程当前目录（本项目即构建目录），既扫不到盘上的视频，又会顺着构建缓存一路递归。
+/// 因此入库前必须归一为盘根，且**只归一这一种形态**，不猜测其他写法。
+pub fn normalize_local_root(location: &str) -> String {
+    let raw = location.trim();
+    let bytes = raw.as_bytes();
+    if bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return format!("{}:\\", bytes[0] as char);
+    }
+    raw.to_owned()
+}
+
 /// 递归枚举目录树下的视频文件并提交候选项。本地目录源与局域网路径源共用
 /// （M5 抽出的共用发现逻辑：新增源类型只提供「路径形态」，不复制扫描代码）。
+///
+/// 健壮性（对「整块硬盘」这种超大根目录是必需的）：
+/// - **单点故障不扩大**：某个子目录读不动（权限 / 已被删除 / 网络瞬时故障）只跳过它，
+///   不把整次扫描判为失败——否则盘上一个坏目录就会让用户一条都拿不到；
+/// - **不跟随链接**：符号链接与目录联结一律跳过，避免绕进环里或在网络位置上无限递归；
+/// - **可取消**：每次进入目录与每条探测前检查取消位，取消后已提交条目保留。
 fn discover_video_tree(
     root: &Path,
     src: &MediaSource,
@@ -264,6 +291,11 @@ fn discover_video_tree(
 
     let mut stat = DiscoverStat::default();
     let mut stack = vec![root.to_path_buf()];
+    let mut dirs_scanned = 0u64;
+    let mut files_seen = 0u64;
+    let mut last_report: Option<std::time::Instant> = None;
+
+    report_discovering(sink, 0, 0, &stat, root);
 
     while let Some(dir) = stack.pop() {
         if sink.is_cancelled() {
@@ -271,15 +303,39 @@ fn discover_video_tree(
             stat.cancelled = true;
             break;
         }
-        let entries = std::fs::read_dir(&dir).map_err(|e| PortError::Backend(e.to_string()))?;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                stat.skipped += 1;
+                dirs_scanned += 1;
+                continue;
+            }
+        };
         for entry in entries {
-            let entry = entry.map_err(|e| PortError::Backend(e.to_string()))?;
+            let Ok(entry) = entry else {
+                // 单条读不动同样只跳过：一次扫描不该被一条坏记录终止
+                stat.skipped += 1;
+                continue;
+            };
+            let Ok(file_type) = entry.file_type() else {
+                stat.skipped += 1;
+                continue;
+            };
+            // 不跟随链接：`file_type` 不解析链接目标，因此这里能识别出链接本身
+            if file_type.is_symlink() {
+                stat.skipped += 1;
+                continue;
+            }
             let path = entry.path();
-            if path.is_dir() {
+            if file_type.is_dir() {
                 stack.push(path);
                 continue;
             }
+            files_seen += 1;
             if !is_video(&path) {
+                if should_report(&mut last_report) {
+                    report_discovering(sink, dirs_scanned, files_seen, &stat, &path);
+                }
                 continue;
             }
             let rel = rel_path(&path, root);
@@ -298,9 +354,50 @@ fn discover_video_tree(
             if sink.submit(candidate).is_ok() {
                 stat.discovered += 1;
             }
+            if should_report(&mut last_report) {
+                report_discovering(sink, dirs_scanned, files_seen, &stat, &path);
+            }
+        }
+        dirs_scanned += 1;
+        if should_report(&mut last_report) {
+            report_discovering(sink, dirs_scanned, files_seen, &stat, &dir);
         }
     }
+
+    // 收尾补报一次：节流可能吞掉了最后几次，界面应当看到最终计数
+    report_discovering(sink, dirs_scanned, files_seen, &stat, root);
     Ok(stat)
+}
+
+/// 组装并上报一个「发现中」进度快照。
+fn report_discovering(
+    sink: &dyn DiscoverSink,
+    dirs_scanned: u64,
+    files_seen: u64,
+    stat: &DiscoverStat,
+    current: &Path,
+) {
+    sink.progress(&ScanProgress {
+        stage: ScanStage::Discovering,
+        dirs_scanned,
+        files_seen,
+        discovered: stat.discovered,
+        skipped: stat.skipped,
+        cancelled: stat.cancelled,
+        current: Some(current.display().to_string()),
+        ..ScanProgress::default()
+    });
+}
+
+/// 进度上报节流：最多每 [`REPORT_INTERVAL`] 一次。
+fn should_report(last: &mut Option<std::time::Instant>) -> bool {
+    if let Some(prev) = last {
+        if prev.elapsed() < REPORT_INTERVAL {
+            return false;
+        }
+    }
+    *last = Some(std::time::Instant::now());
+    true
 }
 
 fn is_video(path: &Path) -> bool {

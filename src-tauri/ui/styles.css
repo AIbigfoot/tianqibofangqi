@@ -409,6 +409,47 @@ body { display: flex; flex-direction: column; }
   pointer-events: none;
 }
 
+/* ---------- 扫描进度浮层（FR-01） ---------- */
+
+/* 停在左下角：扫描期间界面仍可正常浏览，因此只有卡片自己吃事件 */
+.scan-overlay {
+  position: absolute; left: 18px; bottom: calc(var(--bar-h) + 18px);
+  z-index: 25;
+  pointer-events: none;
+}
+.scan-card {
+  width: 340px; max-width: 66vw;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+}
+.scan-card h3 { margin: 0 0 10px; font-size: 14px; }
+.scan-bar { height: 6px; border-radius: 999px; background: var(--bg); overflow: hidden; }
+.scan-bar-fill {
+  height: 100%; width: 0;
+  border-radius: 999px;
+  background: var(--blue);
+  transition: width 0.18s linear;
+}
+/* 发现阶段总量未知：走不确定动画，不假装有分母 */
+.scan-bar-fill.pending { width: 34%; animation: scan-slide 1.15s ease-in-out infinite; }
+@keyframes scan-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(310%); }
+}
+.scan-detail { margin: 10px 0 0; font-size: 12px; color: var(--txt-dim); }
+.scan-current {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--txt-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.scan-current:empty { display: none; }
+.scan-card .modal-actions { margin-top: 12px; }
+
 .hidden { display: none !important; }
 
 /* ---------- 实时字幕（FR-05） ---------- */

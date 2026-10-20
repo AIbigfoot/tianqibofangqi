@@ -151,7 +151,46 @@ pub struct DiscoverStat {
     pub discovered: u64,
     /// 命中稳定键并合并的条目数（幂等）。
     pub merged: u64,
+    /// 不可读 / 主动避开（符号链接、目录联结）而被跳过的目录与条目数。
+    ///
+    /// 它不是错误：整块硬盘上一个坏目录不该让这次扫描判为失败，但也不能悄悄吞掉。
+    pub skipped: u64,
     /// 是否因取消信号提前结束；已提交条目保留。
+    pub cancelled: bool,
+}
+
+/// 扫描阶段（进度上报用）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScanStage {
+    /// 枚举目录树、提交候选项。
+    #[default]
+    Discovering,
+    /// 逐条探测流事实（时长 / 画质 / 字幕）。
+    Probing,
+}
+
+/// 一次扫描的进度快照（[`crate::ports::media_source::DiscoverSink::progress`] 的输出单元）。
+///
+/// 该结构是「给界面看的」：只放可展示的计数与文本，不放任何内部句柄。
+/// 各计数都是**累计值**，界面直接覆盖显示即可，无需自行求和。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScanProgress {
+    pub stage: ScanStage,
+    /// 已处理的目录数（`Discovering` 阶段增长）。
+    pub dirs_scanned: u64,
+    /// 已读到的文件条目数（含非视频文件）。
+    pub files_seen: u64,
+    /// 已提交并落库的候选条目数。
+    pub discovered: u64,
+    /// 不可读 / 被跳过（如符号链接）的目录与条目数。
+    pub skipped: u64,
+    /// 探测阶段：当前第几条（从 1 起）。
+    pub probe_current: u64,
+    /// 探测阶段：本次待探测的总条数。
+    pub probe_total: u64,
+    /// 当前正在处理的路径（探测阶段为条目标题）。
+    pub current: Option<String>,
+    /// 是否已收到取消请求。
     pub cancelled: bool,
 }
 

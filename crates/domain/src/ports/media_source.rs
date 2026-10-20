@@ -4,7 +4,9 @@
 //! （后续）`CloudDriveProvider`。
 
 use crate::error::Result;
-use crate::model::{DiscoveredItem, MediaItem, MediaSource, PlayableRef, SourceKind, StreamFacts};
+use crate::model::{
+    DiscoveredItem, MediaItem, MediaSource, PlayableRef, ScanProgress, SourceKind, StreamFacts,
+};
 
 /// 发现过程的回执出口。提供者在 `discover` 中通过该出口提交候选项，
 /// 并从中读取取消信号。
@@ -18,6 +20,12 @@ pub trait DiscoverSink: Send + Sync {
 
     /// 是否已请求取消。
     fn is_cancelled(&self) -> bool;
+
+    /// 上报一次进度快照。**默认空实现**：不关心进度的实现（空实现、单测假体）
+    /// 无需改动即可继续编译；需要驱动界面进度条的实现覆写它。
+    ///
+    /// 上报不构成控制流：返回 `()`，提供者不得据此改变扫描算法。
+    fn progress(&self, _progress: &ScanProgress) {}
 }
 
 /// 媒体源类型端口。

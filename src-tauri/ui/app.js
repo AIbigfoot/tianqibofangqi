@@ -25,6 +25,7 @@ const els = {};
 [
   'dir-input', 'dir-browse', 'add-btn', 'scan-btn', 'data-btn', 'online-btn', 'preview-toggle', 'stats',
   'data-modal', 'data-path', 'data-export', 'data-import', 'data-cancel',
+  'scan-overlay', 'scan-title', 'scan-bar-fill', 'scan-detail', 'scan-current', 'scan-cancel',
   'online-modal', 'online-url', 'online-import', 'online-cancel', 'online-result',
   'searchbar', 'search-input', 'filter-toggle', 'multi-toggle', 'sort-select', 'size-group', 'filter-bar', 'dims',
   'wall', 'empty', 'grid', 'sources',
@@ -901,8 +902,80 @@ async function addSource() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 扫描进度浮层（FR-01）
+//
+// 进度完全来自后端 `scan-progress` 事件（L3 逐目录上报、L1 逐条探测上报），
+// 前端不做任何估算：估算的进度条在「整块硬盘」这种目录树上只会骗人。
+// ---------------------------------------------------------------------------
+
+/** 本次扫描正在处理的源名，拼在标题前缀上（进度事件只带源 id）。 */
+let scanTargetName = '';
+
+function openScanOverlay() {
+  scanTargetName = '';
+  els['scan-title'].textContent = '正在扫描';
+  els['scan-detail'].textContent = '正在枚举目录…';
+  els['scan-current'].textContent = '';
+  els['scan-bar-fill'].style.width = '0';
+  els['scan-bar-fill'].classList.add('pending');
+  els['scan-cancel'].disabled = false;
+  els['scan-cancel'].textContent = '取消扫描';
+  els['scan-overlay'].classList.remove('hidden');
+}
+
+function closeScanOverlay() {
+  els['scan-overlay'].classList.add('hidden');
+  els['scan-bar-fill'].classList.remove('pending');
+}
+
+/** 把一条 `scan-progress` 事件渲染到浮层上。 */
+function renderScanProgress(p) {
+  if (!p) {
+    return;
+  }
+  const prefix = scanTargetName ? `${scanTargetName} · ` : '';
+  const skipped = p.skipped ? ` · 跳过 ${p.skipped} 项` : '';
+
+  if (p.stage === 'probing') {
+    // 探测阶段有确定的分母：画确定进度条，用户能看到「还剩几条」
+    const total = Math.max(1, p.probeTotal || 0);
+    const done = Math.min(p.probeCurrent || 0, total);
+    els['scan-bar-fill'].classList.remove('pending');
+    els['scan-bar-fill'].style.width = `${Math.round((done / total) * 100)}%`;
+    els['scan-title'].textContent = `${prefix}正在探测时长（${done} / ${total}）`;
+    els['scan-detail'].textContent = `已入库 ${p.discovered} 条${skipped}`;
+  } else {
+    // 发现阶段总量未知：不确定进度条 + 计数，不假装有分母
+    els['scan-bar-fill'].classList.add('pending');
+    els['scan-title'].textContent = p.cancelled
+      ? `${prefix}正在取消…`
+      : `${prefix}正在扫描目录`;
+    els['scan-detail'].textContent =
+      `已扫描 ${p.dirsScanned} 个目录 · 已读 ${p.filesSeen} 个文件 · 已入库 ${p.discovered} 条${skipped}`;
+  }
+
+  els['scan-current'].textContent = p.current || '';
+  els['scan-current'].title = p.current || '';
+}
+
+async function cancelScan() {
+  els['scan-cancel'].disabled = true;
+  els['scan-cancel'].textContent = '正在取消…';
+  try {
+    await invoke('cancel_scan');
+  } catch (err) {
+    showToast(String(err));
+  }
+}
+
 async function scanAll() {
   els['scan-btn'].disabled = true;
+  openScanOverlay();
+  // 先挂监听再发命令：后端在命令入口就会推第一条进度，晚了会丢掉这次起点
+  const unlisten = listen
+    ? await listen('scan-progress', (event) => renderScanProgress(event.payload))
+    : null;
   try {
     const sources = await invoke('list_sources');
     if (!sources.length) {
@@ -910,18 +983,29 @@ async function scanAll() {
       return;
     }
     let stored = 0;
+    let skipped = 0;
     let failed = 0;
+    let cancelled = false;
     for (const source of sources) {
+      scanTargetName = source.name;
       try {
         const report = await invoke('scan_source', { id: source.id });
         stored += report.stored;
+        skipped += report.skipped || 0;
+        if (report.cancelled) {
+          // 取消后不再扫下一个源：用户要的是「停下来」，不是「换个源继续」
+          cancelled = true;
+          break;
+        }
       } catch (err) {
         failed += 1;
         showToast(`${source.name} 扫描失败：${err}`);
       }
     }
-    if (!failed) {
-      showToast(`扫描完成：共 ${stored} 条`);
+    if (cancelled) {
+      showToast(`已取消扫描：本次入库 ${stored} 条`);
+    } else if (!failed) {
+      showToast(`扫描完成：共 ${stored} 条${skipped ? `，跳过 ${skipped} 项` : ''}`);
     }
     await refresh();
     // 入库会生成派生标签（时长区间 / 画质 / 字幕状态），取值清单随之变化
@@ -929,6 +1013,10 @@ async function scanAll() {
   } catch (err) {
     showToast(String(err));
   } finally {
+    if (unlisten) {
+      unlisten();
+    }
+    closeScanOverlay();
     els['scan-btn'].disabled = false;
   }
 }
@@ -3454,6 +3542,7 @@ async function init() {
   els['dir-browse'].addEventListener('click', browseDir);
   els['add-btn'].addEventListener('click', addSource);
   els['scan-btn'].addEventListener('click', scanAll);
+  els['scan-cancel'].addEventListener('click', cancelScan);
   els['dir-input'].addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       addSource();

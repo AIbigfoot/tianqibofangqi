@@ -2720,6 +2720,118 @@ Copy-Item "D:\cm0\target\debug\cinema-asr.exe" "&lt;项目根&gt;\target\debug\c
           关闭该实例后重建一次通过。<b>结论：重建 release 前先退出应用。</b>
         </p>
       </div>
+      <h3>A.24 「扫描健壮性 + 可见进度 + 可取消」实施与验证记录</h3>
+      <p>
+        触发是用户反馈：<b>「添加好文件夹后没有扫描到文件夹内的文件夹里的视频，而且扫描的时候有假死的情况，
+        扫描逻辑需要优化最好有个可视化进度条能让用户看到正在扫描哪些东西」</b>。
+        本条记录根因取证、四层改动、端口兼容策略与验证结果。
+      </p>
+      <div class="meta-chips">
+        <span class="chip">记录日期 <b>2026-10-20</b></span>
+        <span class="chip">对应阶段 <b>M1 入库 FR-01 · 健壮性与体验</b></span>
+        <span class="chip">验收依据 <b>附录 A.24（非 §10）</b></span>
+        <span class="chip">端口变更 <b>DiscoverSink 增默认方法（向后兼容）</b></span>
+      </div>
+
+      <h4>根因取证（先取证再改，避免「猜一个原因就动手」）</h4>
+      <ul>
+        <li><b>递归本身没坏</b>：<code>discover_video_tree</code> 早已是栈式 DFS 递归，
+          子目录会入栈。用真实目录树实测（<code>sub/a.mp4</code> + 根下 <code>b.mkv</code>）
+          确认子目录中的视频能被发现，「漏扫子目录」不是递归缺失。</li>
+        <li><b>真正的问题在源路径</b>：库中 <code>media_source</code> 里存在一条源，
+          <b>name 与 location 都是裸盘符 <code>D:</code></b>。Windows 上裸盘符是<b>相对</b>路径
+          （<code>D:</code> 指「D 盘的当前目录」，随进程工作目录而变），而应用的当前目录就在
+          <code>D:\同盘项目目录</code> 上——于是 <code>read_dir("D:")</code> 扫的是<b>项目目录</b>，
+          既扫不到盘上的视频，又会顺着 <code>target\</code>（数 GB 构建缓存）一路递归。
+          这一个根因同时解释了两个现象：<b>扫不到</b> 与 <b>假死</b>。</li>
+        <li><b>放大因素</b>：<code>scan_source</code> 是<b>同步命令</b>（跑在主线程），
+          且每个视频都要 spawn 一次 mpv 探测时长，全程无任何进度反馈。目录树一大，
+          界面就是「点了没反应」而不是「在忙」。</li>
+        <li><b>收尾缺陷</b>：源状态停在 <code>scanning</code>（扫描未走完就被关窗），
+          下次启动界面会一直显示「扫描中」。</li>
+      </ul>
+
+      <h4>实现方式（逐层改动，端口只加默认方法）</h4>
+      <ul>
+        <li><b>L2 领域层</b>：<code>model.rs</code> 新增 <code>ScanStage</code>（`Discovering` /
+          `Probing`）与 <code>ScanProgress</code>（各计数<b>均为累计值</b>，界面直接覆盖显示）；
+          <code>DiscoverStat</code> 增 <code>skipped</code>。
+          <code>DiscoverSink</code> 增 <b>带默认空实现</b>的 <code>progress(&amp;ScanProgress)</code>，
+          因此既有实现（空实现、单测假体）<b>一行都不用改</b>即可继续编译。</li>
+        <li><b>L3 适配器</b>：<code>discover_video_tree</code> 变为健壮版——
+          <b>单点故障不扩大</b>（子目录读不动、单条 entry 读不动只跳过并计入 <code>skipped</code>，
+          不再把整次扫描判为失败）、<b>不跟随链接</b>（符号链接 / 目录联结跳过，避免环状递归）、
+          <b>节流上报</b>（最多每 120ms 一次，收尾补报一次保证最终计数准确）。
+          新增 <code>normalize_local_root()</code>：裸盘符 <code>D:</code> → <code>D:\</code>，
+          <b>只归一这一种形态</b>，不猜测其他写法；本地与局域网提供者的根路径都用它归一，
+          使「扫出来的」与「播放拼回的」始终是同一目录。
+          <code>LocalFolderProvider::discover</code> 改用<b>提供者自己的根</b>（与 <code>open</code> 同源），
+          消除 <code>src.location</code> 与 root 可能不一致的隐患。</li>
+        <li><b>L1 服务</b>：新增窄接口 <code>ScanReporter</code> 与 <code>ScanControl</code>
+          （进度出口 + 取消位，两者都可缺省）；原 <code>ImportService::import</code> 签名不变、
+          等价于「不报进度、不可取消」，新增 <code>import_with(…, &amp;ScanControl)</code>。
+          取消位由调用方持有（<code>Arc&lt;AtomicBool&gt;</code>），<code>DbSink</code> 与之共享。
+          探测阶段改为先算<b>待探测集合</b>：既作「第 N / 共 M 条」的分母，
+          也消除了逐条重复过滤。收尾不变式：<b>无论成功 / 取消 / 失败，源都不再停在
+          <code>scanning</code></b>；取消按「用户主动中止」处理——清除失败原因、回到
+          <code>idle</code>、已入库条目保留（不写 <code>scan_failed</code>）。
+          <code>ImportReport</code> 增 <code>cancelled</code>。</li>
+        <li><b>L0 组合根</b>：<code>scan_source</code> 改 <code>async</code> +
+          <code>spawn_blocking</code>（离开主线程，界面不再冻结），进度经
+          <code>scan-progress</code> 事件下发（<code>ScanProgressView</code>，camelCase）；
+          新增 <code>cancel_scan</code> 命令；<code>AppState</code> 增 <code>scan_cancel</code>，
+          每次扫描开跑先清零。启动自愈：把遗留的 <code>scanning</code> 复位为 <code>idle</code>。
+          <code>add_local_source</code> 入库前对路径做 <code>normalize_local_root</code>，
+          从入口上杜绝裸盘符再次落库。产物视图 <code>ImportReportView</code> 增
+          <code>skipped</code> / <code>cancelled</code>。</li>
+        <li><b>前端</b>：新增左下角<b>扫描进度浮层</b>（<code>#scan-overlay</code>）与「取消扫描」按钮。
+          刻意<b>不做全屏遮罩</b>——扫描期间用户仍可浏览影片墙，只有卡片自己吃事件。
+          发现阶段总量未知，走<b>不确定进度条</b>并显示「已扫描 N 个目录 · 已读 M 个文件 ·
+          已入库 K 条 · 跳过 S 项」；探测阶段有确定分母，改画确定进度条（N / M）。
+          <code>scanAll()</code> <b>先 listen 再 invoke</b>（后端在命令入口即推第一条进度，
+          晚挂会丢掉起点），取消后不再扫下一个源；结束后统一关闭浮层并 <code>unlisten</code>。</li>
+      </ul>
+
+      <h4>验证结果（2026-10-20）</h4>
+      <ul>
+        <li><b>单元 / 契约测试</b>：<code>cargo test -p cinema-domain -p cinema-infra -p cinema-app
+          -p cinema-adapters</code> exit 0，全部通过；本轮新增 5 条用例——
+          <code>p01_local_folder_discovers_nested_videos</code>（嵌套发现 + <code>skipped=0</code>）、
+          <code>p01_local_folder_does_not_follow_directory_symlinks</code>（链接不跟随，
+          无创建权限时跳过）、<code>p01_local_root_normalizes_bare_drive_letter</code>（盘符归一）、
+          <code>scan_reports_discovery_then_probe_progress</code>（先发现后探测的上报顺序、
+          N/M 分母与当前条目）、
+          <code>cancelled_scan_keeps_source_idle_and_stores_nothing</code>（取消收尾为
+          <code>scanning → idle</code>、不写失败原因、不再打开文件）。</li>
+        <li><b>debug 构建</b>：exit 0，20.57s，<code>target\debug\cinema-desktop.exe</code>
+          刷新为 <b>2026-10-20 14:41:20</b>（<code>213,753,344</code> 字节）；
+          4 个运行时 sidecar（libmpv-2.dll / yt-dlp.exe / WebView2Loader.dll / cinema-asr.exe）齐备。</li>
+        <li><b>待人工目视确认</b>：点「扫描入库」应出现左下角浮层，目录数 / 文件数 / 已入库条数
+          实时跳动；进入探测阶段后进度条应变为按 <code>N / M</code> 推进的确定进度条，
+          并显示当前条目名；点「取消扫描」应在<b>当前目录 / 当前条目处理完之后</b>停下，
+          提示「已取消扫描：本次入库 K 条」，源状态回到 idle（不再停在「扫描中」）。</li>
+      </ul>
+
+      <div class="callout warn">
+        <span class="ct">避坑：裸盘符是相对路径，必须归一为盘根</span>
+        <p>
+          <code>D:</code> 与 <code>D:\</code> 在 Windows 上语义完全不同：前者是「D 盘的当前目录」
+          （随进程工作目录而变，且 <code>is_dir()</code> 在应用工作目录位于同盘时竟会返回真），
+          后者才是盘根。本次故障正是它引起的，且表现极具误导性——
+          既不报错也扫不到文件，只是「假死」。因此<b>路径入库前必须归一</b>，
+          且只归一这一种形态。
+        </p>
+      </div>
+
+      <div class="callout warn">
+        <span class="ct">操作提醒：需手工清理已污染的旧源</span>
+        <p>
+          归一逻辑只作用于<b>新增 / 重扫的路径解析</b>，不会改写库中已有的
+          <code>location = "D:"</code> 那条源（它仍会被 <code>open</code> 用来拼相对路径）。
+          请删除该源后用「浏览…」重新添加 <code>D:\</code>；重新扫描即可正常收录。
+          旧源的条目会被外键级联移除，属于预期行为。
+        </p>
+      </div>
     </section>
 
     <footer>
