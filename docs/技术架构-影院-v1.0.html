@@ -2652,6 +2652,74 @@ Copy-Item "D:\cm0\target\debug\cinema-asr.exe" "&lt;项目根&gt;\target\debug\c
           <li><b>派生缓存不随库迁移</b>：封面等派生文件换机后由启动自愈按源补抓（见 A.21）。</li>
         </ol>
       </div>
+
+      <h3>A.23 「添加目录：改用系统文件夹选择器」实施与验证记录</h3>
+      <p>
+        触发是用户需求：<b>「添加目录需求需要优化一下，用户需要选择文件夹，而不是复制黏贴文件夹地址」</b>。
+        本条记录实现方式、权限边界、降级路径与验证结果。入库的<b>领域流程与命令契约均未改动</b>，
+        只是把「路径从哪来」由手动粘贴换成系统对话框。
+      </p>
+      <div class="meta-chips">
+        <span class="chip">记录日期 <b>2026-10-20</b></span>
+        <span class="chip">对应阶段 <b>M1 入库 FR-01 · 体验优化</b></span>
+        <span class="chip">验收依据 <b>附录 A.23（非 §10）</b></span>
+        <span class="chip">新增依赖 <b>tauri-plugin-dialog 2.8.3</b></span>
+      </div>
+
+      <h4>实现方式（沿用端口—实现分离，不新增业务命令）</h4>
+      <ul>
+        <li><b>后端</b>：<code>src-tauri/Cargo.toml</code> 增依赖 <code>tauri-plugin-dialog = "2"</code>；
+          <code>main.rs</code> 组合根的 builder 注册 <code>.plugin(tauri_plugin_dialog::init())</code>。
+          入库仍只走既有命令 <code>add_local_source</code>（L0 → L1 → L3），
+          <b>领域层与 L1 流程零改动</b>。</li>
+        <li><b>权限</b>：<code>capabilities/default.json</code> 的 <code>permissions</code> 由
+          <code>["core:default"]</code> 扩为 <code>["core:default", "dialog:default"]</code>。
+          该权限集恰好是 <code>allow-message / allow-save / allow-open</code>，本次只用 <code>open</code>。</li>
+        <li><b>前端</b>：顶栏输入框右侧新增「浏览…」按钮（<code>#dir-browse</code>）；
+          新增 <code>pickFolder()</code>——调用
+          <code>window.__TAURI__.dialog.open({ directory: true, multiple: false })</code>，
+          与 <code>browseDir()</code>——选中后回填输入框，由用户确认再点「添加目录」。</li>
+        <li><b>免粘贴</b>：<code>addSource()</code> 在输入框为空时<b>直接弹出文件夹选择器</b>，
+          选中即入库；输入框有内容时仍按原逻辑提交（保留手动粘贴作为兜底，不破坏既有用法）。
+          空态文案与输入框占位符同步改为引导点「浏览…」。</li>
+        <li><b>降级</b>：插件未就绪或非 Tauri 环境时 <code>pickFolder()</code> 返回 <code>null</code>
+          并提示「请手动填写目录路径」，不抛异常、不影响其余功能。</li>
+      </ul>
+
+      <h4>验证结果（2026-10-20）</h4>
+      <ul>
+        <li><b>依赖可直连拉取</b>：<code>cargo fetch</code> 成功——本机
+          <code>index.crates.io</code> / <code>static.crates.io</code> / <code>crates.io</code> 的 443
+          <b>可直连</b>（与 GitHub 必须走代理不同），新增 <code>rfd 0.16.0</code>、
+          <code>tauri-plugin 2.7.2</code>、<code>tauri-plugin-dialog 2.8.3</code>、
+          <code>tauri-plugin-fs 2.7.1</code> 等 14 个包。</li>
+        <li><b>全局 API 可用性（关键）</b>：读插件源码确认其 <code>build.rs</code> 以
+          <code>global_api_script_path("./api-iife.js")</code> 注册全局脚本，脚本内容为
+          <code>Object.defineProperty(window.__TAURI__, "dialog", …)</code>，即
+          <code>__TAURI__.dialog.open</code> 内部就是
+          <code>invoke("plugin:dialog|open", { options })</code>；返回值为字符串路径或
+          <code>null</code>，与前端判空逻辑一致。本项目 <code>withGlobalTauri: true</code>，
+          <b>故无需任何前端构建步骤或 npm 包</b>。</li>
+        <li><b>debug 构建</b>：exit 0，34.24s，<code>target\debug\cinema-desktop.exe</code>
+          刷新为 <b>2026-10-20 14:05:40</b>（197.2 → 203 MB，+6 MB 即插件与 rfd 体积）。</li>
+        <li><b>release 构建</b>：exit 0，47.08s，<code>target\release\cinema-desktop.exe</code>
+          刷新为 <b>2026-10-20 14:06:58</b>（24.8 MB）；桌面快捷方式 <code>影院.lnk</code>
+          即指向该文件。4 个运行时 sidecar 齐备，实例已重新拉起（pid 12940）。</li>
+        <li><b>权限标识校验</b>：<code>dialog:default</code> 通过 tauri-build 的权限清单校验，
+          两次构建均无能力错误。</li>
+        <li><b>待人工目视确认</b>：点「浏览…」应弹出 Windows 原生文件夹选择器；
+          输入框为空时点「添加目录」应同样弹窗、选中即完成入库。</li>
+      </ul>
+
+      <div class="callout warn">
+        <span class="ct">避坑：release 重建前须关闭正在运行的实例</span>
+        <p>
+          首次重建 release 时构建脚本报
+          <code>另一个程序正在使用此文件，进程无法访问。 (os error 32)</code>——
+          原因是桌面快捷方式启动的 release 实例仍在运行，占用了 <code>target\release</code>。
+          关闭该实例后重建一次通过。<b>结论：重建 release 前先退出应用。</b>
+        </p>
+      </div>
     </section>
 
     <footer>

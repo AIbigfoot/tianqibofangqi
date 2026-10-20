@@ -16,8 +16,9 @@
           class="dir-input"
           type="text"
           spellcheck="false"
-          placeholder="本地目录绝对路径，例如 D:\Movies"
+          placeholder="本地目录绝对路径，或点「浏览…」选择，例如 D:\Movies"
         />
+        <button id="dir-browse" class="btn" title="浏览本机文件夹并填入路径">浏览…</button>
         <button id="add-btn" class="btn primary">添加目录</button>
         <button id="scan-btn" class="btn">扫描入库</button>
         <button id="data-btn" class="btn" title="导出 / 导入库（迁移到其它机器）">数据迁移</button>
@@ -98,7 +99,7 @@
     <main id="wall" class="wall">
       <div id="empty" class="empty">
         <div class="empty-title">还没有内容</div>
-        <div class="empty-sub">在上方填入本地目录路径，点「添加目录」，再点「扫描入库」。</div>
+        <div class="empty-sub">在上方点「浏览…」选择本地目录，点「添加目录」，再点「扫描入库」。</div>
       </div>
       <div id="grid" class="grid"></div>
     </main>

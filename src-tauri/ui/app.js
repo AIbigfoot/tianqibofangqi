@@ -23,7 +23,7 @@ const DPR = window.devicePixelRatio || 1;
 
 const els = {};
 [
-  'dir-input', 'add-btn', 'scan-btn', 'data-btn', 'online-btn', 'preview-toggle', 'stats',
+  'dir-input', 'dir-browse', 'add-btn', 'scan-btn', 'data-btn', 'online-btn', 'preview-toggle', 'stats',
   'data-modal', 'data-path', 'data-export', 'data-import', 'data-cancel',
   'online-modal', 'online-url', 'online-import', 'online-cancel', 'online-result',
   'searchbar', 'search-input', 'filter-toggle', 'multi-toggle', 'sort-select', 'size-group', 'filter-bar', 'dims',
@@ -387,7 +387,7 @@ function renderEmpty() {
   if (!hasQuery()) {
     els.empty.appendChild(el('div', 'empty-title', '还没有内容'));
     els.empty.appendChild(
-      el('div', 'empty-sub', '在上方填入本地目录路径，点「添加目录」，再点「扫描入库」。'),
+      el('div', 'empty-sub', '在上方点「浏览…」选择本地目录，点「添加目录」，再点「扫描入库」。'),
     );
     return;
   }
@@ -849,11 +849,44 @@ async function closePlayer() {
 // 入库（PRD FR-01）
 // ---------------------------------------------------------------------------
 
+// 文件夹选择：由 tauri-plugin-dialog 提供原生对话框，用户直接选目录而不必复制粘贴路径。
+// 插件未就绪（或非 Tauri 环境）时返回 null，调用方回退到手动输入。
+async function pickFolder(title) {
+  const dialog = TAURI && TAURI.dialog;
+  if (!dialog || typeof dialog.open !== 'function') {
+    showToast('当前环境不支持文件夹选择，请手动填写目录路径');
+    return null;
+  }
+  try {
+    const picked = await dialog.open({
+      directory: true,
+      multiple: false,
+      title: title || '选择本地目录',
+    });
+    return typeof picked === 'string' ? picked : null;
+  } catch (err) {
+    showToast(String(err));
+    return null;
+  }
+}
+
+// 「浏览…」：选出目录后只回填输入框，交由用户确认后再点「添加目录」。
+async function browseDir() {
+  const picked = await pickFolder('选择要入库的本地目录');
+  if (picked) {
+    els['dir-input'].value = picked;
+  }
+}
+
 async function addSource() {
-  const path = els['dir-input'].value.trim();
+  let path = els['dir-input'].value.trim();
   if (!path) {
-    showToast('请填写本地目录路径');
-    return;
+    // 路径为空时直接弹系统文件夹选择器：用户只需点路径所在的文件夹即可
+    path = await pickFolder('选择要入库的本地目录');
+    if (!path) {
+      return;
+    }
+    els['dir-input'].value = path;
   }
   els['add-btn'].disabled = true;
   try {
@@ -3418,6 +3451,7 @@ async function init() {
   // 控制条按后端物理像素预留，这里换算成 CSS 像素以精确对齐画面窗口下沿
   document.documentElement.style.setProperty('--bar-h', `${constants.controlBarPx / DPR}px`);
 
+  els['dir-browse'].addEventListener('click', browseDir);
   els['add-btn'].addEventListener('click', addSource);
   els['scan-btn'].addEventListener('click', scanAll);
   els['dir-input'].addEventListener('keydown', (event) => {
