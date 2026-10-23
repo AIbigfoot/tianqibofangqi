@@ -4,6 +4,7 @@
 
 pub mod decode_quota;
 pub mod import_service;
+pub mod metadata_service;
 pub mod playback_service;
 pub mod portability_service;
 pub mod progress_service;

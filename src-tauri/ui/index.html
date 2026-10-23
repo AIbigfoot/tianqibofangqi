@@ -16,7 +16,8 @@
         </button>
         <button id="data-btn" class="btn" title="导出 / 导入库（迁移到其它机器）">数据迁移</button>
         <button id="online-btn" class="btn" title="粘贴列表页 URL，联网导入在线视频与封面">联网导入</button>
-        <button id="manage-btn" class="btn" title="查看媒体源并批量清除库内条目（不删除硬盘文件）">库管理</button>
+        <button id="manage-btn" class="btn" title="管理媒体源：扫描、合并目录、添加视频与清除（不删除硬盘文件）">库管理</button>
+        <button id="meta-btn" class="btn" title="配置元数据数据源（站点地址与 Cookie），并按需补齐元数据">元数据</button>
       </div>
       <button id="console-btn" class="btn" title="主机模式：大屏 + 键盘导航（F10 切换）">主机模式</button>
       <label class="switch" title="关闭后悬停只显示信息层，不自动播放预览">
@@ -36,6 +37,7 @@
         placeholder="搜索标题 / 简介 / 标签名"
       />
       <button id="filter-toggle" class="btn" title="展开或收起维度标签面板">标签筛选</button>
+      <button id="tag-back" class="btn ghost hidden" title="回到打开标签前的页面">← 返回</button>
       <button id="multi-toggle" class="btn" title="勾选影片：2 部以上可进入多屏播放，或批量清除入库记录">多选</button>
       <div class="grow"></div>
       <label class="field">
@@ -47,6 +49,7 @@
           <option value="rating">评分</option>
           <option value="duration">时长</option>
           <option value="last_watched">最近观看</option>
+          <option value="random">随机打乱</option>
         </select>
       </label>
       <div class="seg" id="size-group" role="group" aria-label="海报尺寸">
@@ -154,19 +157,34 @@
       </div>
     </div>
 
-    <!-- 库管理：列出媒体源与条目数，可整源清除（只删库内记录，不删硬盘文件） -->
+    <!-- 库管理：左侧媒体源列表，右侧选中源的详情与操作。所有操作只改库内登记，不删硬盘文件 -->
     <div id="manage-modal" class="modal hidden">
-      <div class="modal-card wide">
-        <h3>库管理</h3>
-        <p class="muted">
-          下面每一条是入库过的媒体源及其条目数。「清除」会删除该源在库里的全部条目
-          （含进度、标签关联与搜索索引），<b>不会删除硬盘上的视频文件</b>；
-          需要时再点「添加目录」重新入库即可。
-        </p>
-        <div id="manage-list" class="manage-list"></div>
-        <div class="modal-actions">
-          <button id="manage-close" class="btn ghost">关闭</button>
+      <div class="manage-panel" role="dialog" aria-modal="true" aria-label="库管理">
+        <header class="manage-head">
+          <span class="manage-mark">库</span>
+          <div class="manage-head-text">
+            <h3>库管理</h3>
+            <div class="manage-sub">只改库内登记，不会移动或删除硬盘文件</div>
+          </div>
+          <div class="grow"></div>
+          <div id="manage-summary" class="manage-summary"></div>
+          <button id="manage-close" class="manage-x" type="button" title="关闭" aria-label="关闭">×</button>
+        </header>
+        <div class="manage-body">
+          <aside class="manage-side">
+            <div class="manage-side-head">
+              <span>媒体源</span>
+              <span id="manage-source-count" class="manage-side-count">0</span>
+            </div>
+            <div id="manage-list" class="manage-list" role="listbox" aria-label="媒体源列表"></div>
+          </aside>
+          <section id="manage-detail" class="manage-detail" aria-live="polite"></section>
         </div>
+        <footer class="manage-foot">
+          <span class="manage-foot-note">清除与解除合并只删库内记录，视频文件保留在原处</span>
+          <div class="grow"></div>
+          <button id="manage-close-2" class="btn ghost" type="button">关闭</button>
+        </footer>
       </div>
     </div>
 
@@ -195,12 +213,169 @@
       </div>
     </div>
 
+    <!-- 元数据数据源设置：站点地址 + 登录 Cookie。保存即验证；Cookie 留空表示保留已保存的值 -->
+    <div id="meta-modal" class="modal hidden">
+      <div class="modal-card wide">
+        <h3>元数据数据源</h3>
+        <p class="muted">
+          按番号从数据源刮削：全名（番号 + 标题）、封面、截图、标签（类别 / 系列 / 片商 / 导演 / 演员）、
+          发行日期、演员、十条高赞短评与预告片。全部内容保存在本机。
+        </p>
+        <label class="meta-field">
+          <span>站点地址</span>
+          <input
+            id="meta-base"
+            class="dir-input"
+            type="text"
+            spellcheck="false"
+            placeholder="https://javdb575.com"
+          />
+        </label>
+        <label class="meta-field">
+          <span>登录 Cookie</span>
+          <textarea
+            id="meta-cookie"
+            class="online-url"
+            rows="4"
+            spellcheck="false"
+            placeholder="粘贴浏览器请求头里的 Cookie 整行"
+          ></textarea>
+        </label>
+        <div class="meta-steps">
+          获取步骤：浏览器登录站点 → 按 F12 打开开发者工具 → 切到 Network（网络）→
+          任选一个请求 → 复制请求头里 Cookie 的完整值粘贴到上面。
+          不填 Cookie 也能刮削标题、封面、截图、标签、日期与演员；短评与预告片需要登录。
+        </div>
+        <div id="meta-status" class="meta-status">—</div>
+        <!-- 推荐看点：基于 10 条高赞短评总结核心看点；选服务商 + 填密钥即可，地址由程序固化 -->
+        <div class="meta-section-title">推荐看点 · 大模型</div>
+        <p class="muted small">
+          主机模式的「推荐看点」横排会把每部影片已存的 10 条高赞短评与联网检索到的资料一起交给大模型，
+          综合成 200–300 字的核心看点并缓存，再次推荐到同一部影片时直接读取、不重复请求。
+          选择服务商、填入 API Key 即可；不配置则按高赞评论本地提炼。
+        </p>
+        <label class="meta-field">
+          <span>服务商</span>
+          <select id="llm-provider" class="select">
+            <option value="deepseek">DeepSeek</option>
+            <option value="openai">OpenAI</option>
+            <option value="custom">自定义（OpenAI 兼容）</option>
+          </select>
+        </label>
+        <label class="meta-field">
+          <span>API Key</span>
+          <input
+            id="llm-key"
+            class="dir-input"
+            type="password"
+            spellcheck="false"
+            placeholder="粘贴服务商的 API Key"
+          />
+        </label>
+        <label id="llm-model-preset" class="meta-field">
+          <span>模型</span>
+          <select id="llm-provider-model" class="select"></select>
+        </label>
+        <div id="llm-custom" class="hidden">
+          <label class="meta-field">
+            <span>接口地址</span>
+            <input
+              id="llm-base"
+              class="dir-input"
+              type="text"
+              spellcheck="false"
+              placeholder="https://api.example.com/v1"
+            />
+          </label>
+          <label class="meta-field">
+            <span>模型名称</span>
+            <input
+              id="llm-model"
+              class="dir-input"
+              type="text"
+              spellcheck="false"
+              placeholder="模型名称"
+            />
+          </label>
+        </div>
+        <div id="llm-status" class="meta-status">—</div>
+        <!-- 补齐进度：批处理期间实时更新（已处理 / 总数 + 当前条目） -->
+        <div id="meta-progress" class="meta-progress hidden">
+          <div class="mp-head">
+            <span id="meta-progress-text">正在补齐元数据…</span>
+            <span id="meta-progress-pct" class="mp-pct">0%</span>
+          </div>
+          <div class="mp-bar"><div id="meta-progress-fill" class="mp-fill"></div></div>
+          <div id="meta-progress-current" class="mp-current"></div>
+        </div>
+        <div class="modal-actions">
+          <button id="meta-save" class="btn primary">保存并验证</button>
+          <button id="meta-scrape-all" class="btn">补齐全库</button>
+          <button id="meta-close" class="btn ghost">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 条目详情：单击海报进入。封面 / 截图 / 标签 / 发行日期 / 演员 / 高赞短评 / 预告片 -->
+    <div id="detail-modal" class="modal hidden">
+      <div class="detail-card">
+        <button id="detail-x" class="detail-x" type="button" title="关闭详情" aria-label="关闭">×</button>
+        <div class="detail-head">
+          <div id="detail-poster" class="detail-poster"></div>
+          <div class="detail-main">
+            <h3 id="detail-title">—</h3>
+            <div id="detail-meta" class="detail-meta">—</div>
+            <div id="detail-tags" class="detail-tags"></div>
+            <div class="detail-actions">
+              <button id="detail-play" class="btn primary">播放正片</button>
+              <button id="detail-trailer" class="btn" disabled>播放预告片</button>
+              <button id="detail-refresh" class="btn">从数据源更新</button>
+            </div>
+            <div id="detail-state" class="detail-state"></div>
+            <div class="detail-hint">
+              上方依次为封面、番号与发行日期、标签（类别 / 系列 / 片商 / 导演 / 演员）；
+              下方可滚动查看截图与 10 条高赞短评；预告片点「播放预告片」或悬停海报自动播放。
+            </div>
+          </div>
+        </div>
+        <div class="detail-section">
+          <div class="detail-section-title">截图</div>
+          <div id="detail-shots" class="detail-shots"></div>
+        </div>
+        <div class="detail-section">
+          <div class="detail-section-title">高赞短评</div>
+          <div id="detail-comments" class="detail-comments"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 预告片舞台：全屏遮罩 + 居中 16:9 画面区 + 画面下方进度条；
+         原生画面窗口只覆盖画面区，进度条留在页面层，点击遮罩或画面即关闭 -->
+    <div id="trailer-stage" class="trailer-stage hidden">
+      <div id="trailer-frame" class="trailer-frame"><span>预告片加载中…</span></div>
+      <div id="trailer-controls" class="trailer-controls">
+        <input id="trailer-seek" class="trailer-seek" type="range" min="0" max="1000" step="1" value="0" />
+        <div id="trailer-time" class="trailer-time">00:00 / --:--</div>
+        <button id="trailer-close" class="btn" type="button">关闭</button>
+      </div>
+    </div>
+
+    <!-- 图片放大：封面与截图点击后全屏查看，点击任意处关闭 -->
+    <div id="lightbox" class="lightbox hidden"><img id="lightbox-img" alt="放大预览" /></div>
+
     <!-- 主机模式（Console）：可切换的大屏 / 键盘导航界面。默认关闭（硬约束 C6）。
          播放时整层隐藏，让位后端原生画面窗口；悬停预览在多选 / 多屏 / 播放态下均不参与。
          维度与取值仍全部来自后端，本层只做呈现与转发。 -->
     <div id="console" class="console hidden">
+      <!-- 沉浸式环境底：随焦点影片封面缓慢虚化淡入，两层交替实现无闪断交叉淡化 -->
+      <div id="c-ambient" class="c-ambient" aria-hidden="true">
+        <div id="c-amb-a" class="c-amb-layer"></div>
+        <div id="c-amb-b" class="c-amb-layer"></div>
+        <div class="c-amb-veil"></div>
+      </div>
+
       <div class="c-top">
-        <div class="c-brand"><span class="mark">影</span><span class="name">影院</span></div>
+        <div class="c-brand"><span class="mark">影</span><span class="name">影院</span><span class="c-mode">主机模式</span></div>
         <div class="grow"></div>
         <span id="c-top-stats" class="c-stats">—</span>
         <span id="c-clock" class="c-clock">--:--</span>
@@ -209,18 +384,26 @@
         <button id="c-to-classic" class="c-icon" type="button" title="回到经典界面（Esc）">经典界面</button>
       </div>
 
-      <!-- 首页屏：最近观看 Hero + 封面卡行 + 分类胶囊行 + 宽幅卡行 -->
+      <!-- 首页屏：推荐看点 + 封面卡行 + 分类胶囊行 + 宽幅卡行 -->
       <div id="c-screen-home" class="c-screen">
-        <div id="c-hero" class="c-hero"></div>
+        <div class="c-row-wrap">
+          <div class="c-row-head">
+            <div class="c-row-title">推荐看点</div>
+            <div id="c-rec-status" class="c-rec-status">正在根据评论总结看点…</div>
+            <div class="grow"></div>
+            <button id="c-rec-refresh" class="c-rec-refresh" type="button" title="换一批推荐">换一批</button>
+          </div>
+          <div id="c-rec-row" class="c-row c-rec"></div>
+        </div>
+        <div class="c-row-wrap">
+          <div class="c-row-title">继续观看</div>
+          <div id="c-wide-row" class="c-row c-wide"></div>
+        </div>
         <div class="c-row-wrap">
           <div class="c-row-title">最近观看</div>
           <div id="c-cover-row" class="c-row"></div>
         </div>
         <div id="c-chips" class="c-chips"></div>
-        <div class="c-row-wrap">
-          <div class="c-row-title">继续观看</div>
-          <div id="c-wide-row" class="c-row c-wide"></div>
-        </div>
       </div>
 
       <!-- 资源库屏：居中搜索框 + 筛选胶囊行 + 大幅海报网格 -->
@@ -242,7 +425,8 @@
       <div id="c-empty" class="c-empty hidden"></div>
 
       <div class="c-hint">
-        <span class="c-badge">影院 菜单</span>
+        <span class="c-badge"><i class="dot"></i>影院</span>
+        <span id="c-focus-title" class="c-focus-title"></span>
         <div class="grow"></div>
         <span class="c-hint-item"><kbd>↑↓←→</kbd> 移动</span>
         <span class="c-hint-item"><kbd>Enter</kbd> 确认</span>
@@ -275,16 +459,52 @@
       </div>
     </div>
 
+    <!-- 播放时的暗底：画面为原生窗口，字幕面板打开 / 实时字幕显示时画面向上收，
+         让出的条带由此层保持纯黑，不露出海报墙 -->
+    <div id="player-backdrop" class="player-backdrop hidden"></div>
+
     <!-- 播放控制条：高度由后端 CONTROL_BAR_PX 换算，保证画面窗口恰好停在它上沿 -->
     <div id="player-bar" class="player-bar hidden">
       <div class="pb-title" id="pb-title">—</div>
-      <button id="pb-toggle" class="pb-btn" title="播放 / 暂停">暂停</button>
+      <button id="pb-toggle" class="pb-btn pb-icon" title="播放 / 暂停" aria-label="播放 / 暂停">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <rect x="6" y="4" width="4" height="16" rx="1"></rect>
+          <rect x="14" y="4" width="4" height="16" rx="1"></rect>
+        </svg>
+      </button>
       <input id="pb-seek" class="pb-seek" type="range" min="0" max="1000" step="1" value="0" />
       <div class="pb-time" id="pb-time">00:00 / 00:00</div>
+      <button id="pb-settings" class="pb-btn" title="播放器设置">设置</button>
       <button id="pb-subtitle" class="pb-btn" title="字幕菜单">字幕</button>
-      <button id="pb-sublive" class="pb-btn hidden" title="本片尚无字幕，可生成实时字幕">实时字幕</button>
+      <button id="pb-sublive" class="pb-btn hidden" title="本片尚无字幕，可在线搜索字幕">在线字幕</button>
       <button id="pb-add-multi" class="pb-btn" title="把当前影片加入多屏播放">加入多屏</button>
       <button id="pb-close" class="pb-btn" title="返回海报墙">返回</button>
+    </div>
+
+    <!-- 播放器设置：快进时长、预览停留时长、预览声音；写入本机偏好 -->
+    <div id="player-settings" class="player-settings hidden">
+      <div class="pset-head">
+        <span class="pset-title">播放器设置</span>
+        <button id="pset-close" class="sm-x" type="button" title="收起">×</button>
+      </div>
+      <label class="pset-row">
+        <span class="pset-label">快进时长</span>
+        <input id="pset-forward" class="pset-input" type="number" min="1" max="600" step="1" />
+        <span class="pset-unit">秒（→ 键）</span>
+      </label>
+      <label class="pset-row">
+        <span class="pset-label">预览停留</span>
+        <input id="pset-preview-delay" class="pset-input" type="number" min="1" max="60" step="1" />
+        <span class="pset-unit">秒</span>
+      </label>
+      <label class="pset-row pset-check">
+        <input id="pset-preview-sound" type="checkbox" />
+        <span>预览播放声音</span>
+      </label>
+      <div class="pset-actions">
+        <button id="pset-save" class="btn primary" type="button">保存</button>
+      </div>
+      <div class="pset-note">设置保存在本机，经典模式与主机模式同时生效</div>
     </div>
 
     <!-- 实时字幕叠层：贴在画面区域底部、控制条上方；原文 + 译文两行 -->
@@ -293,46 +513,24 @@
       <div id="sub-translation" class="sub-line translation hidden"></div>
     </div>
 
-    <!-- 字幕菜单：「字幕」入口常驻可用；「实时字幕」入口是否出现在控制栏由后端决定 -->
+    <!-- 字幕菜单：「字幕」入口常驻可用；「在线字幕」入口只在尚无可用字幕轨道时出现 -->
     <div id="subtitle-menu" class="subtitle-menu hidden">
       <div class="sm-head">
         <span class="sm-title">字幕</span>
-        <span id="sm-state" class="sm-state">未开启</span>
+        <span id="sm-state" class="sm-state">未挂载字幕</span>
         <button id="sm-close" class="sm-x" type="button" title="收起">×</button>
       </div>
       <div id="sm-tracks" class="sm-tracks hidden"></div>
       <div id="sm-notice" class="sm-notice hidden"></div>
-      <div class="sm-sub-title">实时字幕</div>
-      <div id="sm-queue" class="sm-queue hidden"></div>
-      <label class="sm-row">
-        <span class="sm-label">原声语种</span>
-        <select id="sm-origin-lang" class="select">
-          <option value="">自动判定</option>
-          <option value="zh">中文</option>
-          <option value="en">英语</option>
-          <option value="ja">日语</option>
-          <option value="ko">韩语</option>
-        </select>
-      </label>
-      <label class="sm-row">
-        <span class="sm-label">目标语言</span>
-        <select id="sm-target-lang" class="select">
-          <option value="zh-Hans">简体中文</option>
-          <option value="">不翻译（原声同语种）</option>
-        </select>
-      </label>
-      <div class="sm-row">
-        <span class="sm-label">呈现</span>
-        <div class="seg" id="sm-display-group" role="group" aria-label="字幕呈现">
-          <button type="button" class="seg-btn on" data-display="bilingual">原文+译文</button>
-          <button type="button" class="seg-btn" data-display="translationOnly">仅译文</button>
-          <button type="button" class="seg-btn" data-display="originOnly">仅原文</button>
+      <div class="sm-sub-title">在线字幕</div>
+      <div class="sm-online">
+        <div class="sm-online-search">
+          <input id="sm-online-query" class="sm-online-input" type="text" placeholder="番号或片名，留空自动识别" />
+          <button id="sm-online-search" class="btn primary" type="button">搜索</button>
         </div>
-      </div>
-      <div class="sm-actions">
-        <button id="sm-start" class="btn primary" type="button">生成实时字幕</button>
-        <button id="sm-save" class="btn hidden" type="button">保存为字幕轨道</button>
-        <button id="sm-stop" class="btn ghost hidden" type="button">关闭实时字幕</button>
+        <div id="sm-online-status" class="sm-online-status hidden"></div>
+        <div id="sm-online-list" class="sm-online-list hidden"></div>
+        <div class="sm-online-src">字幕来源：迅雷影音字幕库，点选后立即挂载</div>
       </div>
     </div>
 
@@ -384,6 +582,21 @@
 
     <!-- 悬停预览的信息层：预览不可用时在此标注原因（FR-02 / FR-06 三种降级态之一） -->
     <div id="preview-note" class="preview-note hidden"></div>
+
+    <!-- 放大预览舞台：原生画面窗口覆盖 frame 区域，四周暗底与下方控制条留在页面层。
+         停留达到设定秒数后展开，画面内容为随机片段。 -->
+    <div id="preview-stage" class="preview-stage hidden">
+      <div class="ps-backdrop"></div>
+      <div id="preview-frame" class="ps-frame"></div>
+      <div id="preview-controls" class="ps-controls">
+        <div class="ps-info">
+          <div id="preview-title" class="ps-title">—</div>
+          <div class="ps-hint">随机片段预览 · 点击画面进入详情</div>
+        </div>
+        <button id="preview-sound" class="btn" type="button">声音：关</button>
+        <button id="preview-close" class="btn ghost" type="button">收起</button>
+      </div>
+    </div>
 
     <!-- 扫描进度浮层（FR-01）：长扫描既要看得见，也要能中止。
          刻意不做全屏遮罩——扫描期间用户仍可浏览影片墙。 -->

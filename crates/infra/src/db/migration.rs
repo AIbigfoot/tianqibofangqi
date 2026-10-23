@@ -39,7 +39,58 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0002_scan_error",
         sql: include_str!("../../migrations/0002_scan_error.sql"),
     },
+    Migration {
+        version: 3,
+        name: "0003_metadata",
+        sql: include_str!("../../migrations/0003_metadata.sql"),
+    },
+    Migration {
+        version: 4,
+        name: "0004_highlight",
+        sql: include_str!("../../migrations/0004_highlight.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "0005_highlight_regen",
+        sql: include_str!("../../migrations/0005_highlight_regen.sql"),
+    },
+    Migration {
+        version: 6,
+        name: "0006_highlight_regen2",
+        sql: include_str!("../../migrations/0006_highlight_regen2.sql"),
+    },
+    Migration {
+        version: 7,
+        name: "0007_highlight_sources",
+        sql: include_str!("../../migrations/0007_highlight_sources.sql"),
+    },
+    Migration {
+        version: 8,
+        name: "0008_highlight_regen3",
+        sql: include_str!("../../migrations/0008_highlight_regen3.sql"),
+    },
+    Migration {
+        version: 9,
+        name: "0009_source_roots",
+        sql: include_str!("../../migrations/0009_source_roots.sql"),
+    },
 ];
+
+/// 旧库自愈：`0003_metadata` 曾被改写成最终形态，但已登记 version=3 的库不会重跑，
+/// 于是 `media_item` 可能缺 `external_code` 等列（启动时 SELECT 直接报错）。
+/// 这里按「列是否存在」幂等判断，缺了就补跑一次 0003（ALTER + 建表都是新对象，可重复执行）。
+pub fn ensure_metadata_schema(conn: &Connection) -> Result<()> {
+    let present: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('media_item') WHERE name = 'external_code'",
+        [],
+        |row| row.get(0),
+    )?;
+    if present > 0 {
+        return Ok(());
+    }
+    conn.execute_batch(include_str!("../../migrations/0003_metadata.sql"))?;
+    Ok(())
+}
 
 /// 迁移执行器。
 pub struct MigrationRunner;
@@ -334,7 +385,7 @@ mod tests {
         // 1) 造样本：只跑到上一版本，并写入用户数据
         {
             let db = crate::db::Database::open(&path).expect("打开磁盘库");
-            let version = MigrationRunner::run(db.conn(), Path::new(""), &MIGRATIONS[..1])
+            let version = MigrationRunner::run(db.conn(), Path::new(""), &MIGRATIONS[..previous as usize])
                 .expect("先建到上一版本");
             assert_eq!(version, previous, "样本库必须停在上一版本");
             seed_previous_version_data(db.conn());

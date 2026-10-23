@@ -2964,9 +2964,160 @@ Copy-Item "D:\cm0\target\debug\cinema-asr.exe" "&lt;项目根&gt;\target\debug\c
           改为函数内局部 <code>list</code> 后修复。
         </p>
       </div>
-    </section>
+      <h3>A.27 「影视库完善：以 JavDB 为数据源的元数据刮削」实施与验证记录</h3>
+      <p>
+        触发是用户需求：<b>「完善影视库，数据源 https://javdb580.com/」</b>，要求为每个条目补齐
+        <b>全名（番号 + 标题）、封面、截图、十条高赞评论、标签（类别 / 系列 / 片商 / 导演）、
+        发行日期、演员与预告片</b>，且内容保存在本地。取证时用户给的
+        <code>javdb580.com</code> 已失效，改用可用镜像 <code>javdb575.com</code> 作为默认值，
+        并做成「元数据」弹层里的可配置项。
+      </p>
+      <div class="meta-chips">
+        <span class="chip">记录日期 <b>2026-10-21</b></span>
+        <span class="chip">对应阶段 <b>P-06 元数据源 · FR-02 海报墙详情</b></span>
+        <span class="chip">验收依据 <b>附录 A.27（非 §10）</b></span>
+        <span class="chip">改动面 <b>L2 端口/规则 + L3 适配器 + L1 服务 + L4 迁移/仓储 + 组合根 + ui ×3</b></span>
+      </div>
 
-    <footer>
+      <h4>实现方式</h4>
+      <ul>
+        <li><b>L2 番号识别</b>：<code>javdb_code</code> 纯函数从文件名 / 标题里提取番号候选并规范化
+          （大小写、分隔符统一），<code>same_code</code> 判定站点搜索结果与目标是否同一番号。
+          零依赖、可单测，扫描与刮削共用同一套判定。</li>
+        <li><b>L2 端口</b>：<code>ports/javdb.rs</code> 声明 <code>JavdbClient</code>
+          （<code>login_state / search / detail / fetch_bytes / save_trailer</code>）与
+          <code>RemoteDetail</code>（标题、日期、时长、评分、封面、截图、预告片、五类标签、短评）。
+          <code>JavdbConfig</code> 明确「Cookie 可空」：匿名仍能拿到标题 / 封面 / 截图 / 标签 / 日期 / 演员，
+          只有短评与预告片需要登录。</li>
+        <li><b>L3 适配器</b>：<code>cinema-adapters::javdb</code> 用 <code>ureq</code> + <code>scraper</code>
+          抓取并解析。搜索走 <code>/search?q=&lt;番号&gt;&amp;locale=zh-CN</code>（站点 <code>f=code</code>
+          过滤不可用），结果按「番号完全一致优先」排序；详情走 <code>/v/&lt;uid&gt;?locale=zh-CN</code>
+          取中文标题；截图取 <code>/samples/</code> 链接；短评走 <code>/v/&lt;uid&gt;/reviews/lastest</code>，
+          按点赞数降序截取前 10 条（站点匿名每页仅 3 条，登录后更多）。
+          预告片：登录后为 <code>&lt;video data-url&gt;</code>，请求该端点需带
+          <code>X-Requested-With</code> 与 <code>X-CSRF-Token</code>，返回 JSON 里的 m3u8；
+          <code>save_trailer</code> 对 HLS 逐片下载合并为 <code>.ts</code>，
+          加密 / 偏移流返回 <code>Unsupported</code> 并保留远端地址供在线播放。</li>
+        <li><b>L1 编排</b>：<code>metadata_service</code> 负责「认番号 → 搜索 → 抓详情 → 下载图片 / 预告片 →
+          合并落库」。全名规则 <code>compose_title</code>：<code>番号 + 空格 + 标题</code>
+          （标题已以番号开头则不重复）；用户通过 <code>FieldLock</code> 锁定的标题 / 封面 / 标签不被覆盖；
+          封面与截图下载失败不影响其余字段；刮削失败只写 <code>scrape_state = failed</code> 与
+          <code>scrape_error</code>，不影响播放与已有元数据。</li>
+        <li><b>L4 迁移 0003</b>：<code>media_item</code> 增 <code>external_code / title_origin /
+          release_date / detail_url / trailer_file / trailer_url / trailer_fetched_at /
+          scraped_at / scrape_state / scrape_error</code>；新增 <code>item_screenshot</code> 与
+          <code>item_comment</code>（整体替换语义，评论按赞数序落库）；标签继续复用通用
+          <code>tag_dimension / item_tag</code>，新增 <code>category / series / maker / director / actor</code>
+          五个维度（来源 <code>metadata</code>，用户锁定优先）。</li>
+        <li><b>组合根</b>：新增 <code>javdb_settings / save_javdb_settings / scrape_item /
+          scrape_missing / item_detail / item_screenshot / play_trailer</code> 命令与
+          <code>scrape-progress</code> 事件；扫描结束（未取消）后自动刮削该源待刮条目，
+          「库管理」与详情页提供手动触发；<code>AppState.scraping</code> 做在途去重；
+          启动时把遗留的 <code>running</code> 复位为 <code>pending</code>。
+          悬停预览改为<b>优先播放本地预告片</b>，无预告片才回落到原有的精华片段逻辑。</li>
+        <li><b>前端</b>：顶栏新增「元数据」——站点地址 + Cookie 粘贴框 + 获取步骤 + 「保存并验证」
+          （Cookie 不回显，留空表示保持不变）；海报<b>单击进入详情弹层</b>（封面、截图横排、五类标签、
+          发行日期、演员、十条高赞短评、播放正片 / 播放预告片 / 从数据源更新）；
+          库管理每个源新增「补齐元数据」；批量结束自动刷新封面缓存与标签取值。</li>
+      </ul>
+
+      <h4>验证结果（2026-10-21）</h4>
+      <ul>
+        <li><b>构建/测试</b>：<code>cargo build --release</code> 通过；
+          <code>cargo test --workspace</code> 全绿（domain 45 / adapters 24 / app 67 / infra 30 / 契约 30）。</li>
+        <li><b>解析用例</b>：搜索页、详情页、短评页各用真实结构裁剪成 fixture，
+          覆盖「番号完全一致优先」「标题 = 番号 + 标题」「时长单位（分钟 / 分鍾 / 小时 + 分钟）」
+          「截图只收 /samples/」「匿名预告片入口视为未登录」「短评按赞降序、排除『更多』项」。</li>
+        <li><b>站点限制</b>：匿名短评每页仅 3 条且翻页需 VIP，因此实现为「按赞降序、最多 10 条」；
+          要凑满 10 条需要有效 Cookie——「元数据」弹层会实时回报登录态。</li>
+        <li><b>真实站点联调</b>：以 <code>SSIS-001</code> 对 <code>javdb575.com</code> 跑通
+          「搜索 → 详情 → 解析」：搜索返回 21 条且番号完全一致的排第一；详情拿到中文标题、
+          发行日期 <code>2021-02-19</code>、评分 <code>4.43</code>、10 张截图、6 个类别与
+          系列 / 片商 / 导演、3 位演员、3 条按赞降序的匿名短评（215 / 111 / 45）；
+          匿名的预告片入口为登录页，符合「预告片需 Cookie」的站点行为。</li>
+        <li><b>预告片实测</b>：登录后详情页给出 HLS 地址（<code>/movies/ttm3u8/preview/…m3u8</code>），
+          带 <code>sign</code> 与 <code>t</code> 查询参数。该流为 AES 加密，无法本地保存，
+          因此退化为在线播放，并由组合根补上 <code>Referer</code> 与 <code>Cookie</code> 请求头；
+          mpv 实测 6 秒内推进到 5.3 秒，说明请求头足够。签名地址约 30 分钟过期
+          （旧地址实测返回 403），因此 <code>play_trailer</code> 改为 async：播放前按
+          <code>detail_url</code> 里的 uid 重新解析一次预告片地址，解析失败才退回库内地址，
+          避免「点播放没反应」。
+          另发现：全局 <code>mousemove</code> 的「移出预览矩形即停」会在详情页把刚起的
+          预告片立刻关掉（指针停在按钮上），已改为详情弹层打开时不参与该判定，
+          只由点画面 / 关闭详情 / 5 分钟兜底结束。
+          预告片画面窗口在播放期间开启 <code>WS_EX_TRANSPARENT</code> 鼠标穿透，
+          点击落到全屏遮罩上即关闭；同时对手动预告片调用 <code>unmute_preview</code>
+          解除静音（悬停预览保持静音）。</li>
+        <li><b>旧库自愈</b>：开发期曾把 <code>0003_metadata</code> 改写成最终形态，但登记过
+          <code>version = 3</code> 的库不会重跑迁移。启动时
+          <code>ensure_metadata_schema</code> 按「<code>external_code</code> 列是否存在」幂等判断，
+          缺列则补跑一次 0003，避免界面因 SELECT 缺列直接启动失败。</li>
+      </ul>
+
+      <div class="callout warn">
+        <span class="ct">运维提示：站点会换域名</span>
+        <p>
+          数据源镜像可能随时失效（本轮 <code>javdb580.com</code> 已不可用）。若刮削提示连接失败，
+          在「元数据」里把站点地址改成当前可用镜像即可，无需重新构建。
+        </p>
+      </div>
+      <h3>A.28 「主机模式升级：无边框全屏 + 沉浸式大屏交互」实施与验证记录</h3>
+      <p>
+        触发是用户需求：<b>「主机模式需要升级，点击后进入无框全屏，参考 switch2、ps5 的交互，
+        需要有沉浸感」</b>。原主机模式只是经典界面之上的一层覆盖层，窗口仍带标题栏与边框；
+        本轮把它升级为类似主机的<b>整窗无边框全屏</b>，并补齐随焦点变化的环境背景、
+        悬浮栏与闲置隐藏等沉浸细节。键盘焦点模型与既有导航逻辑保持不变。
+      </p>
+      <div class="meta-chips">
+        <span class="chip">记录日期 <b>2026-10-21</b></span>
+        <span class="chip">对应阶段 <b>P-03 大屏 / 主机模式</b></span>
+        <span class="chip">验收依据 <b>附录 A.28（非 §10）</b></span>
+        <span class="chip">改动面 <b>组合根 + ui ×2 + 样式</b></span>
+      </div>
+
+      <h4>实现方式</h4>
+      <ul>
+        <li><b>无边框全屏（后端）</b>：组合根新增命令
+          <code>set_console_fullscreen(enabled)</code>。进入时先记录主窗口的外框位置、尺寸、
+          是否最大化与是否带边框（<code>CONSOLE_WINDOW_BACKUP</code>，只写一次，
+          重复进入不会把全屏后的状态当成原始状态），随后
+          <code>set_decorations(false)</code> + <code>set_fullscreen(true)</code>；
+          Windows 下即<b>无边框全屏</b>，不切换显示器分辨率。退出时
+          <code>set_fullscreen(false)</code> 并按备份还原边框、尺寸与位置
+          （原为最大化则恢复最大化）。</li>
+        <li><b>进入 / 退出时机</b>：前端 <code>enterConsole()</code> 触发全屏，
+          <code>exitConsole()</code> 还原；顶栏按钮与 <code>F10</code> 走同一条路径。
+          播放中禁止进入主机模式（提示先关闭播放页）；<b>播放中退出</b>时先不还原窗口，
+          等播放页关闭（<code>closePlayer</code>）后再还原，避免原生画面窗口按全屏几何定位、
+          却落在已还原的小窗口里造成尺寸错位。</li>
+        <li><b>环境背景（沉浸核心）</b>：新增整屏环境底 <code>#c-ambient</code>，
+          把<b>当前焦点影片的封面</b>大幅虚化（<code>blur(54px)</code>、提高饱和度）
+          后铺满全屏，两层 DOM 交替做<b>交叉淡化</b>；封面尚未取到时用与占位海报同源的
+          色相渐变兜底，封面迟到则立即替换（<code>loadCover</code> 回调）。
+          焦点移到分类胶囊等非影片节点时保持上一张环境底，不清空。</li>
+        <li><b>PS5 / Switch 式布局</b>：顶栏与底部按键提示条改为<b>悬浮半透明覆盖</b>
+          （顶部 / 底部渐变），不再占据布局高度；顶栏加入「主机模式」金色胶囊标识、
+          更大的时钟与品牌；底栏显示焦点影片标题与 <code>↑↓←→ / Enter / Esc / F10</code>
+          按键提示。进入时整层淡入并轻微推近（<code>c-enter</code>），
+          首页 / 资源库切换带纵向淡入（<code>c-screen-in</code>）。</li>
+        <li><b>闲置沉浸</b>：主机模式下 4 秒无键盘 / 鼠标输入后，顶栏与提示条淡出并隐藏指针
+          （<code>.console.idle</code>），任何按键或鼠标移动立即唤醒；设置浮层打开期间不进入闲置。
+          隐藏滚动条（滚轮与键盘滚动仍可用），大屏观感更干净。</li>
+        <li><b>焦点与尺寸</b>：Hero 高度改为 <code>clamp(280px, 44vh, 520px)</code>，
+          标题随视口放大到 <code>clamp(28px, 3vw, 46px)</code>；
+          封面卡 / 宽幅卡 / 网格三个档位整体上调（中档 176 / 340 / 220px），
+          焦点卡抬升 <code>10px</code>、放大 <code>1.08</code>，蓝色描边与发光加强；
+          胶囊可聚焦并轻微放大。原有行列焦点模型、首尾夹紧与滚动策略未改。</li>
+      </ul>
+
+      <div class="callout warn">
+        <span class="ct">交互提示</span>
+        <p>
+          主机模式记住上次开关状态：若上次退出时处于主机模式，下次启动会直接进入无边框全屏。
+          按 <code>Esc</code>（首页）或 <code>F10</code> 退出主机模式即可还原进入前的窗口大小与边框。
+        </p>
+      </div>
+    </section>
       影院 Cinema · 技术架构 v1.1 · 上游文档：PRD 影院 v1.1 · 状态：待评审
     </footer>
   </main>

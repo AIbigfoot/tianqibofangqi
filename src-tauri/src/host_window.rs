@@ -28,6 +28,9 @@ const SWP_NOACTIVATE: u32 = 0x0010;
 const SWP_SHOWWINDOW: u32 = 0x0040;
 const BLACK_BRUSH: i32 = 4;
 const WM_LBUTTONUP: u32 = 0x0202;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const GWL_EXSTYLE: i32 = -20;
+const WS_EX_TRANSPARENT: u32 = 0x0000_0020;
 
 /// 供 `wnd_proc` 查表用的点击回调，按窗口句柄索引。
 ///
@@ -36,6 +39,16 @@ const WM_LBUTTONUP: u32 = 0x0202;
 /// 压在 webview 之上，落在它上面的鼠标事件不会到达页面。
 fn click_registry() -> &'static Mutex<HashMap<isize, Arc<dyn Fn() + Send + Sync>>> {
     static REGISTRY: OnceLock<Mutex<HashMap<isize, Arc<dyn Fn() + Send + Sync>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 鼠标移动回调：控制条自动隐藏后，指针落在原生画面上时也要能让控制条重新出现。
+///
+/// 回调带上客户区坐标：窗口在指针下方被撑开时系统也会补发 `WM_MOUSEMOVE`，
+/// 这类「位置没变」的事件绝不能当成用户在移动鼠标，否则控制条会收起后立刻弹回。
+fn move_registry() -> &'static Mutex<HashMap<isize, Arc<dyn Fn(i32, i32) + Send + Sync>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<isize, Arc<dyn Fn(i32, i32) + Send + Sync>>>> =
+        OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -99,6 +112,8 @@ extern "system" {
     ) -> i32;
     fn GetClientRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
     fn GetStockObject(index: i32) -> Hgdiobj;
+    fn GetWindowLongW(hwnd: Hwnd, index: i32) -> i32;
+    fn SetWindowLongW(hwnd: Hwnd, index: i32, value: i32) -> i32;
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -152,6 +167,18 @@ unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -
             .and_then(|registry| registry.get(&key).cloned());
         if let Some(handler) = handler {
             handler();
+        }
+    } else if msg == WM_MOUSEMOVE {
+        let key = hwnd as isize;
+        let handler = move_registry()
+            .lock()
+            .ok()
+            .and_then(|registry| registry.get(&key).cloned());
+        if let Some(handler) = handler {
+            // lParam 低 16 位为 x、高 16 位为 y（客户区坐标，有符号）
+            let x = (lp as usize & 0xffff) as u16 as i16 as i32;
+            let y = ((lp as usize >> 16) & 0xffff) as u16 as i16 as i32;
+            handler(x, y);
         }
     }
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
@@ -220,7 +247,7 @@ impl HostWindow {
     /// 占满父窗口客户区，但**底部留出 `reserve_bottom` 像素**。
     ///
     /// 留出的那条正是 webview 里播放控制条所在位置：影片只盖住画面上方，
-    /// 控制条仍可见、可点击。
+    /// 控制条仍可见、可点击。传入 0 时画面铺满整个客户区（控制条自动隐藏时用）。
     pub fn fill_parent(&self, parent: i64, reserve_bottom: i32) {
         let mut rect = Rect {
             left: 0,
@@ -230,8 +257,24 @@ impl HostWindow {
         };
         if unsafe { GetClientRect(parent as Hwnd, &mut rect) } != 0 {
             let width = rect.right - rect.left;
-            let height = rect.bottom - rect.top - reserve_bottom;
+            let height = rect.bottom - rect.top - reserve_bottom.max(0);
             self.place(0, 0, width, height);
+        }
+    }
+
+    /// 鼠标穿透：让点击落到下面的 webview。
+    ///
+    /// 详情页的手动预告片没有 mpv 的点击交互，画面铺满后需要靠 HTML 层接收点击来关闭，
+    /// 因此播放期间开启穿透，停止后立即关闭。悬停预览仍保持可点击（点击进详情）。
+    pub fn set_click_through(&self, on: bool) {
+        unsafe {
+            let style = GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32;
+            let next = if on {
+                style | WS_EX_TRANSPARENT
+            } else {
+                style & !WS_EX_TRANSPARENT
+            };
+            SetWindowLongW(self.hwnd, GWL_EXSTYLE, next as i32);
         }
     }
 
@@ -248,6 +291,15 @@ impl HostWindow {
         F: Fn() + Send + Sync + 'static,
     {
         if let Ok(mut registry) = click_registry().lock() {
+            registry.insert(self.hwnd as isize, Arc::new(handler));
+        }
+    }
+    /// 注册鼠标移动回调（控制条自动隐藏 / 重新出现的判定），回传客户区坐标。
+    pub fn set_on_move<F>(&self, handler: F)
+    where
+        F: Fn(i32, i32) + Send + Sync + 'static,
+    {
+        if let Ok(mut registry) = move_registry().lock() {
             registry.insert(self.hwnd as isize, Arc::new(handler));
         }
     }
@@ -268,6 +320,9 @@ impl Drop for HostWindow {
     fn drop(&mut self) {
         if !self.hwnd.is_null() {
             if let Ok(mut registry) = click_registry().lock() {
+                registry.remove(&(self.hwnd as isize));
+            }
+            if let Ok(mut registry) = move_registry().lock() {
                 registry.remove(&(self.hwnd as isize));
             }
             unsafe {

@@ -849,6 +849,16 @@ fn item_to_model(item: &ManifestItem) -> MediaItem {
         meta_state: meta_from_str(&item.meta_state),
         field_locks: item.field_locks.clone(),
         created_at: item.created_at,
+        external_code: None,
+        title_origin: None,
+        release_date: None,
+        detail_url: None,
+        trailer_file: None,
+        trailer_url: None,
+        trailer_fetched_at: None,
+        scraped_at: None,
+        scrape_state: cinema_domain::model::ScrapeState::Pending,
+        scrape_error: None,
     }
 }
 

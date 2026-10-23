@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use cinema_app::import_service::ImportStore;
+use cinema_app::metadata_service::MetadataStore;
 use cinema_app::portability_service::PortabilityStore;
 use cinema_app::progress_service::ProgressStore;
 use cinema_app::search_service::{ProgressState, SearchStore};
@@ -15,8 +16,8 @@ use cinema_app::subtitle_service::SubtitleStore;
 use cinema_app::tag_service::TagStore;
 use cinema_domain::error::{PortError, Result};
 use cinema_domain::model::{
-    DiscoveredItem, ItemId, MediaItem, MediaSource, Progress, SourceId, SourceState, SubtitleKind,
-    SubtitleTrack,
+    DiscoveredItem, ItemId, MediaItem, MediaSource, Progress, ScrapedComment, ScrapedImage,
+    ScrapeState, SourceId, SourceState, SubtitleKind, SubtitleTrack,
 };
 use cinema_domain::ports::tag_dimension::TagDimensionDef;
 use cinema_domain::portability::{ExportOutcome, ImportOutcome};
@@ -25,7 +26,9 @@ use cinema_domain::tagging::TagUsage;
 use cinema_infra::db::migration::MigrationRunner;
 use cinema_infra::db::Database;
 use cinema_infra::error::InfraError;
-use cinema_infra::repo::{MediaItemRepo, MediaSourceRepo, PlaybackRepo};
+use cinema_infra::repo::{
+    MediaItemRepo, MediaSourceRepo, MetadataRepo, PlaybackRepo,
+};
 use cinema_infra::subtitle_repo::{SettingRepo, SubtitleTrackRepo};
 use cinema_infra::tag_repo::{DimensionRepo, ItemTagRepo, SearchIndexRepo, TagRepo};
 
@@ -260,5 +263,122 @@ impl PortabilityStore for DbStore {
 
     fn local_schema_version(&self) -> Result<i64> {
         self.with(|db| MigrationRunner::current_version(db.conn()).map_err(port_err))
+    }
+}
+
+impl MetadataStore for DbStore {
+    fn item(&self, id: &ItemId) -> Result<MediaItem> {
+        self.with(|db| {
+            MediaItemRepo::get(db.conn(), id)
+                .map_err(port_err)?
+                .ok_or_else(|| PortError::NotFound(format!("条目不存在：{}", id.0)))
+        })
+    }
+
+    fn save_scraped(&self, item: &MediaItem) -> Result<()> {
+        self.with(|db| MediaItemRepo::save_scraped(db.conn(), item).map_err(port_err))
+    }
+
+    fn set_scrape_state(
+        &self,
+        id: &ItemId,
+        state: ScrapeState,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.with(|db| MediaItemRepo::set_scrape_state(db.conn(), id, state, error).map_err(port_err))
+    }
+
+    fn pending_ids(&self, source_id: Option<&SourceId>) -> Result<Vec<ItemId>> {
+        self.with(|db| MediaItemRepo::ids_pending_scrape(db.conn(), source_id).map_err(port_err))
+    }
+
+    fn reset_running(&self) -> Result<usize> {
+        self.with(|db| MediaItemRepo::reset_running_scrapes(db.conn()).map_err(port_err))
+    }
+
+    fn replace_screenshots(&self, id: &ItemId, shots: &[ScrapedImage]) -> Result<()> {
+        self.with(|db| MetadataRepo::replace_screenshots(db.conn(), id, shots).map_err(port_err))
+    }
+
+    fn replace_comments(&self, id: &ItemId, comments: &[ScrapedComment]) -> Result<()> {
+        self.with(|db| MetadataRepo::replace_comments(db.conn(), id, comments).map_err(port_err))
+    }
+
+    fn replace_metadata_tags(
+        &self,
+        id: &ItemId,
+        dimension_id: &str,
+        values: &[String],
+    ) -> Result<()> {
+        self.with(|db| {
+            ItemTagRepo::replace_metadata(db.conn(), id, dimension_id, values).map_err(port_err)
+        })
+    }
+
+    fn reindex_item(&self, id: &ItemId) -> Result<()> {
+        self.with(|db| SearchIndexRepo::reindex_item(db.conn(), id).map_err(port_err))
+    }
+
+    fn write_poster(&self, id: &ItemId, bytes: &[u8]) -> Result<String> {
+        let dir = self
+            .poster_dir
+            .clone()
+            .ok_or_else(|| PortError::Backend("未配置海报目录".into()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| port_err(InfraError::Io(e)))?;
+        // 文件名只由条目 id 决定：重复刮削直接覆盖，不会越积越多
+        let name = format!("{}.{}", safe_name(&id.0), image_ext(bytes));
+        std::fs::write(dir.join(&name), bytes).map_err(|e| port_err(InfraError::Io(e)))?;
+        Ok(name)
+    }
+
+    fn write_screenshot(&self, id: &ItemId, file_name: &str, bytes: &[u8]) -> Result<()> {
+        let dir = self.data_root()?.join("shots");
+        std::fs::create_dir_all(&dir).map_err(|e| port_err(InfraError::Io(e)))?;
+        let _ = id;
+        std::fs::write(dir.join(safe_name(file_name)), bytes)
+            .map_err(|e| port_err(InfraError::Io(e)))
+    }
+
+    fn trailer_dest(&self, id: &ItemId, ext: &str) -> Result<PathBuf> {
+        let dir = self.data_root()?.join("trailers");
+        std::fs::create_dir_all(&dir).map_err(|e| port_err(InfraError::Io(e)))?;
+        let ext = ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>();
+        Ok(dir.join(format!("{}.{}", safe_name(&id.0), ext)))
+    }
+}
+
+impl DbStore {
+    /// 数据目录：海报目录的父目录（组合根保证存在）。
+    fn data_root(&self) -> Result<PathBuf> {
+        self.poster_dir
+            .as_ref()
+            .and_then(|dir| dir.parent().map(Path::to_path_buf))
+            .ok_or_else(|| PortError::Backend("未配置数据目录".into()))
+    }
+}
+
+/// 只保留安全字符，防止外部文件名带路径分隔写穿目录。
+fn safe_name(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// 按文件头判断图片扩展名；识别不了时按 jpg（站点封面恒为 jpeg）。
+fn image_ext(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        "jpg"
+    } else if bytes.starts_with(b"\x89PNG") {
+        "png"
+    } else if bytes.starts_with(b"RIFF") {
+        "webp"
+    } else {
+        "jpg"
     }
 }

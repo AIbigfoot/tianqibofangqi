@@ -298,6 +298,28 @@ impl TagRepo {
         Ok(out)
     }
 
+    /// 全库删除一个标签取值：清掉所有条目关联与黑名单，再删除标签行本身。
+    ///
+    /// 返回受影响的条目 id —— 调用方据此重建这些条目的搜索索引（索引里含标签名）。
+    pub fn delete_value(conn: &Connection, tag_id: &str) -> Result<Vec<String>> {
+        let affected = {
+            let mut stmt = conn.prepare("SELECT item_id FROM item_tag WHERE tag_id = ?1")?;
+            let rows = stmt.query_map(params![tag_id], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        conn.execute("DELETE FROM item_tag WHERE tag_id = ?1", params![tag_id])?;
+        conn.execute(
+            "DELETE FROM item_tag_blacklist WHERE tag_id = ?1",
+            params![tag_id],
+        )?;
+        conn.execute("DELETE FROM tag WHERE id = ?1", params![tag_id])?;
+        Ok(affected)
+    }
+
     /// 用户锁定 / 解锁标签（PRD FR-03：元数据不得覆盖用户已锁定标签）。
     pub fn set_locked(conn: &Connection, tag_id: &str, locked: bool) -> Result<()> {
         conn.execute(
@@ -379,6 +401,46 @@ impl ItemTagRepo {
                 continue;
             }
             Self::set(conn, item_id, &tag_id, TagOrigin::Derived, false)?;
+        }
+        Ok(())
+    }
+
+    /// 重算某维度上的**元数据**标签：替换元数据源写入的取值。
+    ///
+    /// 与 [`Self::replace_derived`] 同构，但只动 `origin='metadata'` 的行：
+    /// 用户手动添加（`origin='user'`）、已锁定与黑名单标签都不受影响（PRD FR-03）。
+    pub fn replace_metadata(
+        conn: &Connection,
+        item_id: &ItemId,
+        dimension_id: &str,
+        values: &[String],
+    ) -> Result<()> {
+        conn.execute(
+            "DELETE FROM item_tag
+             WHERE item_id = ?1 AND origin = 'metadata' AND locked = 0
+               AND tag_id IN (SELECT id FROM tag WHERE dimension_id = ?2)",
+            params![item_id.as_str(), dimension_id],
+        )?;
+        for value in values {
+            if value.trim().is_empty() {
+                continue;
+            }
+            let tag_id = TagRepo::ensure(conn, dimension_id, value, &[])?;
+            if Self::is_blacklisted(conn, item_id, &tag_id)? {
+                continue;
+            }
+            // 用户已手动选择同一取值：保留 `origin='user'`，刮削不得降级来源
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT origin FROM item_tag WHERE item_id = ?1 AND tag_id = ?2",
+                    params![item_id.as_str(), tag_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if existing.as_deref() == Some("user") {
+                continue;
+            }
+            Self::set(conn, item_id, &tag_id, TagOrigin::Metadata, false)?;
         }
         Ok(())
     }
@@ -637,7 +699,10 @@ mod tests {
         seed_dimensions(&db); // 重复播种不得产生第二行
 
         let dims = DimensionRepo::list(db.conn()).expect("读取维度");
-        assert_eq!(dims.len(), 9);
+        assert_eq!(
+            dims.len(),
+            cinema_domain::ports::tag_dimension::TagDimensionDef::builtin_defaults().len()
+        );
         for pair in dims.windows(2) {
             assert!(pair[0].order < pair[1].order, "必须按 order 升序返回");
         }

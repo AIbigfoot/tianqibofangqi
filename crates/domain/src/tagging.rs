@@ -27,6 +27,15 @@ pub const DIM_WATCH: &str = "watch";
 pub const DIM_SUBTITLE: &str = "subtitle";
 pub const DIM_CUSTOM: &str = "custom";
 
+/// JavDB 刮削维度：类别 / 系列 / 片商 / 导演 / 演员。
+///
+/// 这些取值完全由元数据源提供，复用通用标签体系，因此检索、筛选与导出无需改动。
+pub const DIM_CATEGORY: &str = "category";
+pub const DIM_SERIES: &str = "series";
+pub const DIM_MAKER: &str = "maker";
+pub const DIM_DIRECTOR: &str = "director";
+pub const DIM_ACTOR: &str = "actor";
+
 // ---------------------------------------------------------------------------
 // 派生规则标识（tag_dimension.derive_rule）
 // ---------------------------------------------------------------------------
@@ -295,12 +304,12 @@ mod tests {
     #[test]
     fn builtin_defaults_cover_fr03_dimensions() {
         let defs = TagDimensionDef::builtin_defaults();
-        assert_eq!(defs.len(), 9, "FR-03 标签体系共九个维度");
+        assert_eq!(defs.len(), 14, "FR-03 九个维度 + JavDB 五个刮削维度");
 
         let mut ids: Vec<&str> = defs.iter().map(|d| d.id.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 9, "维度 id 不得重复");
+        assert_eq!(ids.len(), 14, "维度 id 不得重复");
 
         // 序必须严格升序，保证界面顺序稳定
         for pair in defs.windows(2) {

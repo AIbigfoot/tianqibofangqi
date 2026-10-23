@@ -100,6 +100,25 @@ pub enum MetaState {
     PendingFill,
 }
 
+/// 元数据刮削状态（`media_item.scrape_state`）。
+///
+/// 与 [`MetaState`] 不同：`MetaState` 描述「条目能否播放所依赖的元数据是否齐」，
+/// 刮削状态只描述「与外部数据源的一次同步进行到哪一步」，失败不影响入库与播放。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrapeState {
+    /// 尚未刮削（新入库条目的默认值）。
+    #[default]
+    Pending,
+    /// 正在刮削（跨命令的在途标记）。
+    Running,
+    /// 已成功写入刮削结果。
+    Done,
+    /// 刮削失败（原因见 `scrape_error`）。
+    Failed,
+    /// 文件名里没有可识别的番号，等待用户手动指定。
+    NoCode,
+}
+
 /// 媒体条目（`media_item`）。字段为文档表结构的子集，按需增列不算破坏契约。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaItem {
@@ -123,6 +142,23 @@ pub struct MediaItem {
     pub field_locks: Option<String>,
     /// 入库时间（`media_item.created_at`）。PRD FR-02「最近添加」排序使用。
     pub created_at: Option<i64>,
+    /// 番号（由文件名识别或用户指定），如 `SSIS-001`。
+    pub external_code: Option<String>,
+    /// 数据源给出的原文标题（详情页“原標題”）。
+    pub title_origin: Option<String>,
+    /// 发行日期 `YYYY-MM-DD`。
+    pub release_date: Option<String>,
+    /// 数据源详情页 URL，重新刮削时可直接命中。
+    pub detail_url: Option<String>,
+    /// 本地预告片文件名（`trailers/` 下）。
+    pub trailer_file: Option<String>,
+    /// 预告片来源 URL（仅作追溯，播放用本地文件）。
+    pub trailer_url: Option<String>,
+    pub trailer_fetched_at: Option<i64>,
+    /// 上次刮削成功时间。
+    pub scraped_at: Option<i64>,
+    pub scrape_state: ScrapeState,
+    pub scrape_error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +331,23 @@ pub struct Metadata {
     /// 封面候选 URL。
     pub poster_url: Option<String>,
     pub tags: Vec<String>,
+}
+
+/// 数据源抓取到的一条评论（已按赞数排序前的原始结果）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScrapedComment {
+    pub author: Option<String>,
+    pub score: Option<i32>,
+    pub content: String,
+    pub likes: u32,
+    pub posted_at: Option<String>,
+}
+
+/// 已下载到本地的图片：`file_name` 是缓存目录下的文件名。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrapedImage {
+    pub file_name: String,
+    pub source_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +541,16 @@ impl MediaItem {
             meta_state: MetaState::PendingFill,
             field_locks: None,
             created_at: None,
+            external_code: None,
+            title_origin: None,
+            release_date: None,
+            detail_url: None,
+            trailer_file: None,
+            trailer_url: None,
+            trailer_fetched_at: None,
+            scraped_at: None,
+            scrape_state: ScrapeState::Pending,
+            scrape_error: None,
         }
     }
 }

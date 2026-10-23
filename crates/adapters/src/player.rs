@@ -108,6 +108,24 @@ impl MpvPlayerCore {
         self.muted.load(Ordering::SeqCst)
     }
 
+    /// 画面的显示宽高比（宽 / 高）；尚未解码出画面时返回 `None`。
+    ///
+    /// 宿主窗口恒为矩形，mpv 按视频比例居中留黑边；前端据此把字幕放进**画面内**底部，
+    /// 而不是窗口底部（否则字幕会落在下方黑边上）。
+    pub fn video_aspect(&self) -> Option<f64> {
+        if let Some(aspect) = self
+            .inst
+            .get_string("video-params/aspect")
+            .and_then(|raw| raw.parse::<f64>().ok())
+            .filter(|aspect| *aspect > 0.0)
+        {
+            return Some(aspect);
+        }
+        let width = self.inst.get_string("width")?.parse::<f64>().ok()?;
+        let height = self.inst.get_string("height")?.parse::<f64>().ok()?;
+        (width > 0.0 && height > 0.0).then_some(width / height)
+    }
+
     /// 取当前抽取实例（若已创建），用于镜像播放状态。
     fn tap_instance(&self) -> Option<Arc<MpvInstance>> {
         self.tap

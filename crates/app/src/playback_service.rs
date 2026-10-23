@@ -394,6 +394,22 @@ impl<F: PlayerFactory> PlaybackService<F> {
         }
     }
 
+    /// 手动点播的预告片需要声音：解除预览实例的静音。
+    ///
+    /// 悬停预览仍走 [`PlaybackService::start_preview`] 的常驻静音路径，两者互不影响。
+    pub fn unmute_preview(&mut self) {
+        if let Some(player) = self.preview.as_ref() {
+            player.set_muted(false);
+        }
+    }
+
+    /// 设置预览实例是否静音（悬停预览的声音开关）。
+    pub fn set_preview_muted(&mut self, muted: bool) {
+        if let Some(player) = self.preview.as_ref() {
+            player.set_muted(muted);
+        }
+    }
+
     /// 过载治理（PRD FR-06 异常表 / §11「资源优先级」）：
     /// 先终止预览，其次才考虑提示降低多屏画质；**不**关闭用户已开启的窗口。
     pub fn overload(&mut self) -> OverloadOutcome {

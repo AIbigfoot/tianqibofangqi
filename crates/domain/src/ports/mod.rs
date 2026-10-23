@@ -3,6 +3,7 @@
 //! 契约定义在 L2、实现放 L3；前端可见的类型通过代码生成同步到 TS（M0 暂不含生成器）。
 //! 除 P-05 外，其余均为 trait；P-05 是「配置 + 数据驱动」的注册表，不设枚举。
 
+pub mod javdb;
 pub mod media_source;
 pub mod metadata;
 pub mod player;

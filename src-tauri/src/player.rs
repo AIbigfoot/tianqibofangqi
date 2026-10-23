@@ -80,6 +80,11 @@ impl MpvPlayerFactory {
         }
     }
 
+    /// 当前预览实例（悬停预览 / 详情页预告片共用），供命令层读取进度。
+    pub fn preview(&self) -> Option<Arc<MpvPlayerCore>> {
+        self.preview.lock().ok().and_then(|slot| slot.clone())
+    }
+
     /// 释放预览实例句柄，语义同 [`MpvPlayerFactory::forget_screen`]。
     pub fn forget_preview(&self) {
         if let Ok(mut slot) = self.preview.lock() {

@@ -10,6 +10,7 @@
 //! 与 IO 无关的规则（用户锁定、音频焦点、轨道优先级、检索组合）在 [`rules`]。
 
 pub mod error;
+pub mod javdb_code;
 pub mod model;
 pub mod portability;
 pub mod ports;

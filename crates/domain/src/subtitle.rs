@@ -392,13 +392,21 @@ impl CueCollector {
 // 外挂字幕文本解析（PRD FR-05 失败出口「加载外挂字幕」）
 // ---------------------------------------------------------------------------
 
-/// 解析 SRT / WebVTT 文本为字幕句。**纯函数，无 IO**（文件读取在 L3/L4）。
+/// 解析 SRT / WebVTT / ASS / SSA 文本为字幕句。**纯函数，无 IO**（文件读取在 L3/L4）。
 ///
-/// 宽松解析：按空行分块，块内找到时间行，其后所有非空行拼成该句正文。
-/// 时间同时接受 `HH:MM:SS,mmm` 与 `HH:MM:SS.mmm`；WebVTT 的 `WEBVTT` 头、
-/// 序号行与 `-->` 之后的 cue 设置都被自然跳过。无法解析的块整块忽略。
+/// SRT / WebVTT：宽松解析，按空行分块，块内找到时间行，其后所有非空行拼成该句正文。
+/// 时间同时接受 `HH:MM:SS,mmm` 与 `HH:MM:SS.mmm`；`WEBVTT` 头、序号行与 `-->` 之后的
+/// cue 设置都被自然跳过。ASS / SSA 按 `[Events]` 的 `Format:` 字段顺序读取
+/// `Start` / `End` / `Text`，去掉 `{\...}` 覆盖标签并把 `\N` 还原为换行。
+/// 无法解析的块整块忽略。
 pub fn parse_subtitle_text(text: &str) -> Vec<SubtitleCue> {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    if looks_like_ass(&normalized) {
+        let cues = parse_ass_text(&normalized);
+        if !cues.is_empty() {
+            return cues;
+        }
+    }
     let mut cues = Vec::new();
     for block in normalized.split("\n\n") {
         let lines: Vec<&str> = block.lines().collect();
@@ -426,6 +434,141 @@ pub fn parse_subtitle_text(text: &str) -> Vec<SubtitleCue> {
     }
     cues
 }
+
+/// 解析 ASS / SSA 的 `[Events]` 段。
+///
+/// 字段顺序以该段的 `Format:` 行为准（`Text` 一般是最后一列，可能含逗号）；
+/// 没有 `Format:` 时按常见的 10 列布局兜底。容忍以下真实文件差异：
+/// - 段名 / 指令名大小写不一致、`Dialogue` 与冒号间有空格；
+/// - 文件开头带 UTF-8 BOM；
+/// - 末尾空字段被省略（此时把最后一个字段当正文）；
+/// - `Comment:` 等非对话行直接忽略。
+fn parse_ass_text(text: &str) -> Vec<SubtitleCue> {
+    let mut in_events = false;
+    let mut field_count = 10;
+    let mut start_idx = 1;
+    let mut end_idx = 2;
+    let mut text_idx = 9;
+    let mut cues = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim().trim_start_matches('\u{feff}');
+        if trimmed.starts_with('[') {
+            in_events = trimmed.eq_ignore_ascii_case("[Events]");
+            continue;
+        }
+        if !in_events {
+            continue;
+        }
+        if let Some(rest) = strip_prefix_ci(trimmed, "Format") {
+            let Some(rest) = rest.trim_start().strip_prefix(':') else {
+                continue;
+            };
+            let fields: Vec<String> = rest
+                .split(',')
+                .map(|f| f.trim().to_ascii_lowercase())
+                .collect();
+            if fields.len() >= 3 {
+                // 只有三列齐全时才采用该 Format，避免把样式段的坏行当成事件格式
+                let start = fields.iter().position(|f| f == "start");
+                let end = fields.iter().position(|f| f == "end");
+                let text = fields.iter().position(|f| f == "text");
+                if let (Some(start), Some(end), Some(text)) = (start, end, text) {
+                    field_count = fields.len();
+                    start_idx = start;
+                    end_idx = end;
+                    text_idx = text;
+                }
+            }
+            continue;
+        }
+        let Some(rest) = strip_prefix_ci(trimmed, "Dialogue") else {
+            continue;
+        };
+        let Some(body) = rest.trim_start().strip_prefix(':') else {
+            continue;
+        };
+        // Text 列通常是最后一列：限制分割段数，让正文里的逗号保留下来
+        let parts: Vec<&str> = body.splitn(field_count, ',').collect();
+        let part_count = parts.len();
+        let text_index = if text_idx < part_count {
+            text_idx
+        } else if text_idx + 1 == field_count && part_count > 0 {
+            // 末尾空字段被省略：最后一个字段就是正文
+            part_count - 1
+        } else {
+            continue;
+        };
+        if start_idx >= part_count || end_idx >= part_count {
+            continue;
+        }
+        if text_index <= start_idx || text_index <= end_idx {
+            continue;
+        }
+        let (Some(start_ms), Some(end_ms)) = (parse_time(parts[start_idx]), parse_time(parts[end_idx])) else {
+            continue;
+        };
+        let body_text = clean_ass_text(parts[text_index].trim());
+        if body_text.is_empty() {
+            continue;
+        }
+        cues.push(SubtitleCue {
+            start_ms,
+            end_ms,
+            text: body_text,
+            lang: None,
+        });
+    }
+    cues
+}
+
+/// 忽略大小写匹配前缀，返回其后的文本（按字节安全，不切坏多字节字符）。
+fn strip_prefix_ci<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    if head.eq_ignore_ascii_case(prefix) {
+        text.get(prefix.len()..)
+    } else {
+        None
+    }
+}
+
+/// 判断文本是否按 ASS / SSA 解析（`[Events]` 段或 `Dialogue:` 行，不区分大小写）。
+fn looks_like_ass(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        strip_prefix_ci(line, "[Events]").is_some() || strip_prefix_ci(line, "Dialogue").is_some()
+    })
+}
+
+/// 去掉 ASS 覆盖标签（`{\an8}` 等）并还原 `\N` / `\n` / `\h`。
+fn clean_ass_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut depth = 0usize;
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            '\\' if depth == 0 => match chars.next() {
+                Some('N') | Some('n') => out.push('\n'),
+                Some('h') => out.push(' '),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            },
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 
 fn parse_time_range(line: &str) -> Option<(i64, i64)> {
     let (left, right) = line.split_once("-->")?;
@@ -683,5 +826,52 @@ mod tests {
     fn malformed_blocks_are_ignored() {
         assert!(parse_subtitle_text("这是一段没有任何时间行的文本").is_empty());
         assert!(parse_subtitle_text("1\n00:00:01,000 --> 00:00:02,000\n").is_empty(), "无正文的块忽略");
+    }
+
+    #[test]
+    fn ass_dialogue_lines_parse_into_cues() {
+        let text = "[Script Info]\nTitle: t\n\n[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default,楷体\n\n[Events]\nFormat: Layer, Start, End, Style, Actor, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.23,0:00:05.66,Default,,0,0,0,,{\\an8}第一行\\N第二行\nDialogue: 0,0:01:07.93,0:01:08.99,Default,,0,0,0,,逗号,保留\n";
+        let cues = parse_subtitle_text(text);
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].start_ms, 1230, "ASS 时间按百分秒");
+        assert_eq!(cues[0].end_ms, 5660);
+        assert_eq!(cues[0].text, "第一行\n第二行", "覆盖标签去除、\\N 换行");
+        assert_eq!(cues[1].text, "逗号,保留", "正文中的逗号保留");
+    }
+
+    #[test]
+    fn ass_tolerates_bom_case_and_missing_tail_fields() {
+        let text = "\u{feff}[Script Info]\nTitle: t\n\n[STYLES]\nFormat: Name, Fontname\nStyle: Default,a\n\n[events]\nformat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nComment: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,,注释行\nDialogue : 0,0:00:02.00,0:00:04.00,Default,,0,0,0,末字段省略\n";
+        let cues = parse_subtitle_text(text);
+        assert_eq!(cues.len(), 1, "Comment 行忽略、小写段名与 BOM 兼容");
+        assert_eq!(cues[0].start_ms, 2000);
+        assert_eq!(cues[0].end_ms, 4000);
+        assert_eq!(cues[0].text, "末字段省略");
+    }
+
+    #[test]
+    fn ass_text_cleans_inline_overrides_and_hard_space() {
+        let text = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\pos(320,50)\\c&H00FFFF&}前\\h中{\\i1}后{\\i0}\\n尾\n";
+        let cues = parse_subtitle_text(text);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "前 中后\n尾", "行内标签去除、\\h 变空格、\\n 换行");
+    }
+
+    #[test]
+    fn ass_format_order_from_header_is_respected() {
+        let text = "[Events]\nFormat: Start, End, Text\nDialogue: 0:00:10.50,0:00:12.00,只有三列\n";
+        let cues = parse_subtitle_text(text);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].start_ms, 10_500);
+        assert_eq!(cues[0].end_ms, 12_000);
+        assert_eq!(cues[0].text, "只有三列");
+    }
+
+    #[test]
+    fn ass_drawing_and_empty_cues_are_dropped() {
+        let text = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\an8}\nDialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,有效\n";
+        let cues = parse_subtitle_text(text);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "有效");
     }
 }

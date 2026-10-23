@@ -18,18 +18,21 @@ use tauri::State;
 use cinema_adapters::subtitle::{
     LocalAsrSubtitleEngine, RemoteSubtitleEngine, ScriptedInlineEngine,
 };
+use cinema_adapters::xunlei_subtitle::{OnlineSubtitle, XunleiSubtitleClient};
 use cinema_app::subtitle_service::{
     CloseOutcome, EngineInfo, EngineOption, EngineRegistry, StartRequest, SubtitleService,
     SubtitleStore, SubtitleView, KEY_ENABLED, KEY_REMOTE_AUTH,
 };
 use cinema_domain::model::{
-    EngineLocality, ItemId, QualityLevel, SubtitleCue, SubtitleKind, SubtitleTrack, TapMode,
+    EngineLocality, ItemId, MediaItem, QualityLevel, SubtitleCue, SubtitleKind, SubtitleTrack,
+    TapMode,
 };
 use cinema_domain::ports::player::PlayerCore;
 use cinema_domain::ports::subtitle::{AudioTap, SubtitleEngine};
 use cinema_domain::subtitle::{
     parse_subtitle_text, session_cfg, CueDisplay, DegradeAction, RealtimeState,
 };
+use cinema_infra::repo::MediaItemRepo;
 use cinema_infra::subtitle_repo::SubtitleTrackRepo;
 
 use crate::AppState;
@@ -707,6 +710,168 @@ pub fn subtitle_add_external(
     let track = ctx
         .service
         .add_external_track(state.store.as_ref(), &item_id, cues, None)
+        .map_err(|e| e.reason().to_string())?;
+    Ok(track_view(track))
+}
+
+/// 在线字幕候选（界面列表项）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnlineSubtitleView {
+    pub name: String,
+    pub url: String,
+    pub ext: String,
+    pub lang: String,
+    pub source: String,
+    pub duration_ms: Option<i64>,
+}
+
+fn online_view(sub: OnlineSubtitle) -> OnlineSubtitleView {
+    OnlineSubtitleView {
+        name: sub.name,
+        url: sub.url,
+        ext: sub.ext,
+        lang: sub.lang,
+        source: sub.source,
+        duration_ms: sub.duration_ms,
+    }
+}
+
+/// 搜索关键词候选：番号优先，其次标题与文件名（去重，最多 3 个）。
+fn online_search_terms(item: &MediaItem) -> Vec<String> {
+    let file_stem = item
+        .rel_path
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).file_stem())
+        .and_then(|s| s.to_str());
+    let candidates = [
+        item.external_code.as_deref(),
+        Some(item.title.as_str()),
+        file_stem,
+        item.title_origin.as_deref(),
+    ];
+    let mut terms: Vec<String> = Vec::new();
+    for candidate in candidates.into_iter().flatten() {
+        let term = candidate.trim();
+        if term.is_empty() || terms.iter().any(|t| t.eq_ignore_ascii_case(term)) {
+            continue;
+        }
+        terms.push(term.to_owned());
+        if terms.len() >= 3 {
+            break;
+        }
+    }
+    terms
+}
+
+/// 在线字幕搜索：`query` 为空时按条目番号 / 标题 / 文件名依次检索迅雷字幕库。
+#[tauri::command]
+pub async fn subtitle_online_search(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    query: Option<String>,
+) -> std::result::Result<Vec<OnlineSubtitleView>, String> {
+    let explicit = query
+        .map(|q| q.trim().to_owned())
+        .filter(|q| !q.is_empty());
+    let terms = match explicit {
+        Some(q) => vec![q],
+        None => {
+            let item_id = match item_id {
+                Some(id) => ItemId::from(id),
+                None => item_id_for(&state, None)?,
+            };
+            let db = state
+                .db
+                .lock()
+                .map_err(|_| "数据库锁不可用".to_string())?;
+            let item = MediaItemRepo::get(db.conn(), &item_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "找不到该条目".to_string())?;
+            online_search_terms(&item)
+        }
+    };
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let client = XunleiSubtitleClient::new();
+        let mut merged: Vec<OnlineSubtitle> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut last_error: Option<String> = None;
+        for term in terms {
+            match client.search(&term) {
+                Ok(list) => {
+                    for sub in list {
+                        if seen.insert(sub.url.clone()) {
+                            merged.push(sub);
+                        }
+                    }
+                    if !merged.is_empty() {
+                        break;
+                    }
+                }
+                Err(err) => last_error = Some(err.reason().to_owned()),
+            }
+        }
+        // 所有关键词都请求失败时如实上报，避免界面误判为「没有字幕」
+        if merged.is_empty() {
+            if let Some(reason) = last_error {
+                return Err(reason);
+            }
+        }
+        merged.truncate(30);
+        Ok::<Vec<OnlineSubtitleView>, String>(merged.into_iter().map(online_view).collect())
+    })
+    .await
+    .map_err(|e| format!("在线字幕搜索异常中止：{e}"))?
+}
+
+/// 下载并挂载一条在线字幕：解析为字幕句后保存为外挂轨道（替换旧外挂轨道）。
+#[tauri::command]
+pub async fn subtitle_online_load(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    url: String,
+    lang: Option<String>,
+    slot: Option<u32>,
+) -> std::result::Result<SubtitleTrackView, String> {
+    let item_id = match item_id {
+        Some(id) => ItemId::from(id),
+        None => item_id_for(&state, slot)?,
+    };
+    let url = url.trim().to_owned();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("在线字幕地址无效".to_string());
+    }
+
+    let text = tauri::async_runtime::spawn_blocking(move || {
+        XunleiSubtitleClient::new().fetch_text(&url)
+    })
+    .await
+    .map_err(|e| format!("在线字幕下载异常中止：{e}"))?
+    .map_err(|e| e.reason().to_owned())?;
+
+    let cues = parse_subtitle_text(&text);
+    if cues.is_empty() {
+        return Err("该在线字幕无法解析出任何字幕句".to_string());
+    }
+    let lang = lang
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty() && l != "未标注" && l != "默认");
+
+    let mut runtime = state
+        .subtitles
+        .lock()
+        .map_err(|_| "实时字幕状态锁不可用".to_string())?;
+    let ctx = match slot {
+        Some(slot) => runtime.slot(slot),
+        None => runtime.main(),
+    };
+    let track = ctx
+        .service
+        .add_external_track(state.store.as_ref(), &item_id, cues, lang)
         .map_err(|e| e.reason().to_string())?;
     Ok(track_view(track))
 }

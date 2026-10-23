@@ -4,11 +4,13 @@
 //! 重复扫描不会产生重复行，也不会覆盖用户数据（标题 / 年份 / 海报 / 锁定字段）。
 //! 这正是 PRD FR-01「同一物理文件被重复扫描时合并为一条条目」的落点。
 
+use std::collections::HashMap;
+
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use cinema_domain::model::{
-    IdentifyState, ItemId, MediaItem, MediaSource, MetaState, Progress, SourceId, SourceKind,
-    SourceState,
+    IdentifyState, ItemId, MediaItem, MediaSource, MetaState, Progress, ScrapedComment,
+    ScrapedImage, ScrapeState, SourceId, SourceKind, SourceState,
 };
 
 use crate::error::Result;
@@ -80,6 +82,26 @@ fn meta_from_str(raw: &str) -> MetaState {
     match raw {
         "complete" => MetaState::Complete,
         _ => MetaState::PendingFill,
+    }
+}
+
+fn scrape_to_str(state: ScrapeState) -> &'static str {
+    match state {
+        ScrapeState::Pending => "pending",
+        ScrapeState::Running => "running",
+        ScrapeState::Done => "done",
+        ScrapeState::Failed => "failed",
+        ScrapeState::NoCode => "no_code",
+    }
+}
+
+fn scrape_from_str(raw: &str) -> ScrapeState {
+    match raw {
+        "running" => ScrapeState::Running,
+        "done" => ScrapeState::Done,
+        "failed" => ScrapeState::Failed,
+        "no_code" => ScrapeState::NoCode,
+        _ => ScrapeState::Pending,
     }
 }
 
@@ -192,6 +214,11 @@ impl MediaSourceRepo {
             params![id.as_str()],
         )?;
         tx.execute("DELETE FROM media_source WHERE id = ?1", params![id.as_str()])?;
+        // 合并目录的登记随源一起消失，避免残留指向已删源的根目录
+        tx.execute(
+            "DELETE FROM source_extra_root WHERE source_id = ?1",
+            params![id.as_str()],
+        )?;
         tx.commit()?;
         Ok(items)
     }
@@ -209,6 +236,66 @@ fn read_source(row: &Row<'_>) -> rusqlite::Result<MediaSource> {
         state: source_state_from_str(&state),
         last_scan_at: row.get(6)?,
     })
+}
+
+// ---------------------------------------------------------------------------
+// source_extra_root（合并目录：只登记附加根，不移动文件）
+// ---------------------------------------------------------------------------
+
+/// 媒体源附加根目录仓储。
+pub struct SourceRootRepo;
+
+impl SourceRootRepo {
+    pub fn list(conn: &Connection, source_id: &SourceId) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(
+            "SELECT path FROM source_extra_root WHERE source_id = ?1 ORDER BY created_at, path",
+        )?;
+        let rows = stmt.query_map(params![source_id.as_str()], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn add(conn: &Connection, source_id: &SourceId, path: &str) -> Result<()> {
+        conn.execute(
+            "INSERT INTO source_extra_root (source_id, path, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(source_id, path) DO NOTHING",
+            params![source_id.as_str(), path, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove(conn: &Connection, source_id: &SourceId, path: &str) -> Result<()> {
+        conn.execute(
+            "DELETE FROM source_extra_root WHERE source_id = ?1 AND path = ?2",
+            params![source_id.as_str(), path],
+        )?;
+        Ok(())
+    }
+
+    /// 该附加根下已入库的条目 id（`rel_path` 记的是绝对路径）。
+    pub fn item_ids_under(
+        conn: &Connection,
+        source_id: &SourceId,
+        root: &str,
+    ) -> Result<Vec<String>> {
+        let normalized = root.replace('\\', "/");
+        let prefix = format!("{}/%", normalized.trim_end_matches('/'));
+        let mut stmt = conn.prepare(
+            "SELECT id FROM media_item WHERE source_id = ?1 AND (rel_path = ?2 OR rel_path LIKE ?3)",
+        )?;
+        let rows = stmt.query_map(
+            params![source_id.as_str(), normalized, prefix],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -397,16 +484,359 @@ impl MediaItemRepo {
         tx.commit()?;
         Ok(removed)
     }
+
+    /// 写入一次成功刮削的结果（L1 已完成字段合并与用户锁定过滤）。
+    ///
+    /// 可空字段用 `COALESCE` 保留旧值：本次没抓到封面/预告片时，不把上次下载好的丢掉。
+    pub fn save_scraped(conn: &Connection, item: &MediaItem) -> Result<()> {
+        conn.execute(
+            "UPDATE media_item SET
+                 title = ?2,
+                 year = ?3,
+                 duration_ms = COALESCE(?4, duration_ms),
+                 rating = COALESCE(?5, rating),
+                 poster_id = COALESCE(?6, poster_id),
+                 external_code = COALESCE(?7, external_code),
+                 title_origin = COALESCE(?8, title_origin),
+                 release_date = COALESCE(?9, release_date),
+                 detail_url = COALESCE(?10, detail_url),
+                 trailer_file = COALESCE(?11, trailer_file),
+                 trailer_url = COALESCE(?12, trailer_url),
+                 trailer_fetched_at = COALESCE(?13, trailer_fetched_at),
+                 scraped_at = COALESCE(?14, scraped_at),
+                 scrape_state = ?15,
+                 scrape_error = ?16,
+                 identify_state = ?17,
+                 meta_state = ?18,
+                 updated_at = ?19
+             WHERE id = ?1",
+            params![
+                item.id.as_str(),
+                item.title,
+                item.year,
+                item.duration_ms,
+                item.rating.map(f64::from),
+                item.poster_id,
+                item.external_code,
+                item.title_origin,
+                item.release_date,
+                item.detail_url,
+                item.trailer_file,
+                item.trailer_url,
+                item.trailer_fetched_at,
+                item.scraped_at,
+                scrape_to_str(item.scrape_state),
+                item.scrape_error,
+                identify_to_str(item.identify_state),
+                meta_to_str(item.meta_state),
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 只更新刮削状态与失败原因（不触碰任何元数据字段）。
+    pub fn set_scrape_state(
+        conn: &Connection,
+        id: &ItemId,
+        state: ScrapeState,
+        error: Option<&str>,
+    ) -> Result<()> {
+        conn.execute(
+            "UPDATE media_item SET scrape_state = ?2, scrape_error = ?3, updated_at = ?4
+             WHERE id = ?1",
+            params![id.as_str(), scrape_to_str(state), error, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// 待刮削的条目 id（`pending` / `failed` / `no_code`，且文件未缺失）。
+    ///
+    /// `no_code` 也纳入：番号识别规则升级后，之前的「无法识别」条目需要再试一次；
+    /// 仍识别不出时只会重新标记，不产生网络请求。
+    pub fn ids_pending_scrape(conn: &Connection, source_id: Option<&SourceId>) -> Result<Vec<ItemId>> {
+        let sql = match source_id {
+            Some(_) => {
+                "SELECT id FROM media_item
+                 WHERE source_id = ?1 AND missing_at IS NULL
+                   AND scrape_state IN ('pending', 'failed', 'no_code')
+                 ORDER BY id"
+            }
+            None => {
+                "SELECT id FROM media_item
+                 WHERE missing_at IS NULL AND scrape_state IN ('pending', 'failed', 'no_code')
+                 ORDER BY id"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let mut out: Vec<ItemId> = Vec::new();
+        if let Some(id) = source_id {
+            let rows = stmt.query_map(params![id.as_str()], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                out.push(ItemId(row?));
+            }
+        } else {
+            let rows = stmt.query_map(params![], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                out.push(ItemId(row?));
+            }
+        }
+        Ok(out)
+    }
+
+    /// 上一次应用异常退出时遗留的 `running` 复位为 `pending`（跨命令兜底）。
+    pub fn reset_running_scrapes(conn: &Connection) -> Result<usize> {
+        let n = conn.execute(
+            "UPDATE media_item SET scrape_state = 'pending'
+             WHERE scrape_state = 'running'",
+            params![],
+        )?;
+        Ok(n)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 截图与评论（刮削产物，一对多）
+// ---------------------------------------------------------------------------
+
+/// 截图与评论仓储：**整体替换**语义——一次刮削得到的就是该条目当前的完整集合。
+pub struct MetadataRepo;
+
+impl MetadataRepo {
+    pub fn replace_screenshots(
+        conn: &Connection,
+        item_id: &ItemId,
+        shots: &[ScrapedImage],
+    ) -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM item_screenshot WHERE item_id = ?1",
+            params![item_id.as_str()],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO item_screenshot (item_id, ord, file_name, source_url)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (ord, shot) in shots.iter().enumerate() {
+                stmt.execute(params![
+                    item_id.as_str(),
+                    ord as i64,
+                    shot.file_name,
+                    shot.source_url
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 按各自入库序号返回截图（刮削时已按展示顺序排列）。
+    pub fn screenshots(conn: &Connection, item_id: &ItemId) -> Result<Vec<ScrapedImage>> {
+        let mut stmt = conn.prepare(
+            "SELECT file_name, source_url FROM item_screenshot
+             WHERE item_id = ?1 ORDER BY ord",
+        )?;
+        let rows = stmt.query_map(params![item_id.as_str()], |row| {
+            Ok(ScrapedImage {
+                file_name: row.get(0)?,
+                source_url: row.get(1)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn replace_comments(
+        conn: &Connection,
+        item_id: &ItemId,
+        comments: &[ScrapedComment],
+    ) -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM item_comment WHERE item_id = ?1",
+            params![item_id.as_str()],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO item_comment (item_id, ord, author, score, content, likes, posted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for (ord, comment) in comments.iter().enumerate() {
+                stmt.execute(params![
+                    item_id.as_str(),
+                    ord as i64,
+                    comment.author,
+                    comment.score,
+                    comment.content,
+                    comment.likes as i64,
+                    comment.posted_at
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 已按赞数降序落库的评论（展示序号即排序）。
+    pub fn comments(conn: &Connection, item_id: &ItemId) -> Result<Vec<ScrapedComment>> {
+        let mut stmt = conn.prepare(
+            "SELECT author, score, content, likes, posted_at FROM item_comment
+             WHERE item_id = ?1 ORDER BY ord",
+        )?;
+        let rows = stmt.query_map(params![item_id.as_str()], |row| {
+            Ok(ScrapedComment {
+                author: row.get(0)?,
+                score: row.get(1)?,
+                content: row.get(2)?,
+                likes: row.get::<_, i64>(3)?.max(0) as u32,
+                posted_at: row.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 推荐候选：带短评的条目（按评论条数聚合计数）。
+    ///
+    /// 没有评论的条目无从总结看点，因此一律不进入候选池。
+    pub fn commented_items(conn: &Connection) -> Result<Vec<CommentedItem>> {
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.title, m.external_code, m.rating,
+                    CASE WHEN m.poster_id IS NULL THEN 0 ELSE 1 END,
+                    COUNT(c.item_id),
+                    COALESCE(m.overview, ''),
+                    COALESCE((SELECT GROUP_CONCAT(t.name, '、')
+                              FROM item_tag it JOIN tag t ON t.id = it.tag_id
+                              WHERE it.item_id = m.id), '')
+             FROM media_item m
+             JOIN item_comment c ON c.item_id = m.id
+             GROUP BY m.id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(CommentedItem {
+                id: ItemId(row.get(0)?),
+                title: row.get(1)?,
+                code: row.get(2)?,
+                rating: row.get(3)?,
+                has_poster: row.get::<_, i64>(4)? != 0,
+                comment_count: row.get(5)?,
+                overview: row.get(6)?,
+                tags: row.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 全部已缓存的核心看点（`item_id` → 看点）。
+    pub fn cached_highlights(conn: &Connection) -> Result<HashMap<String, CachedHighlight>> {
+        let mut stmt = conn.prepare(
+            "SELECT item_id, highlight, comment_count, source, extra_count FROM item_highlight",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                CachedHighlight {
+                    text: row.get(1)?,
+                    comment_count: row.get(2)?,
+                    source: row.get(3)?,
+                    extra_count: row.get(4)?,
+                },
+            ))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (id, highlight) = row?;
+            out.insert(id, highlight);
+        }
+        Ok(out)
+    }
+
+    /// 写入（或覆盖）一条核心看点缓存。
+    ///
+    /// `extra_count` 是除短评外参与总结的资料条数（简介 / 标签 / 联网结果），
+    /// 只用于界面标注来源，不参与过期判定。
+    pub fn save_highlight(
+        conn: &Connection,
+        item_id: &ItemId,
+        text: &str,
+        comment_count: i64,
+        extra_count: i64,
+        source: &str,
+        model: Option<&str>,
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO item_highlight (
+                 item_id, highlight, comment_count, extra_count, source, model, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(item_id) DO UPDATE SET
+                 highlight = excluded.highlight,
+                 comment_count = excluded.comment_count,
+                 extra_count = excluded.extra_count,
+                 source = excluded.source,
+                 model = excluded.model,
+                 created_at = excluded.created_at",
+            params![
+                item_id.as_str(),
+                text,
+                comment_count,
+                extra_count,
+                source,
+                model,
+                now_ms()
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+/// 一条可用于推荐的候选影片（带短评的条目）。
+#[derive(Debug, Clone)]
+pub struct CommentedItem {
+    pub id: ItemId,
+    pub title: String,
+    pub code: Option<String>,
+    pub rating: Option<f32>,
+    pub has_poster: bool,
+    pub comment_count: i64,
+    /// 数据源写入的剧情简介，总结看点时作为评论之外的资料。
+    pub overview: String,
+    /// 已抓取的标签（类别 / 系列 / 片商 / 导演 / 演员），顿号分隔。
+    pub tags: String,
+}
+
+/// 已缓存的核心看点。
+#[derive(Debug, Clone)]
+pub struct CachedHighlight {
+    pub text: String,
+    pub comment_count: i64,
+    /// `llm`（大模型总结）或 `local`（本地兜底提炼）。
+    pub source: String,
+    /// 生成时参与总结的额外资料条数（简介 / 标签 / 联网结果）。
+    pub extra_count: i64,
 }
 
 /// 读列顺序必须与 [`ITEM_COLUMNS`] 一致。
 const ITEM_COLUMNS: &str = "id, source_id, stable_key, rel_path, url, title, year, duration_ms, \
                             rating, overview, poster_id, size_bytes, mtime, identify_state, \
-                            meta_state, field_locks, created_at";
+                            meta_state, field_locks, created_at, external_code, title_origin, \
+                            release_date, detail_url, trailer_file, trailer_url, \
+                            trailer_fetched_at, scraped_at, scrape_state, scrape_error";
 
 fn read_item(row: &Row<'_>) -> rusqlite::Result<MediaItem> {
     let identify: String = row.get(13)?;
     let meta: String = row.get(14)?;
+    let scrape: String = row.get(25)?;
     Ok(MediaItem {
         id: ItemId(row.get(0)?),
         source_id: SourceId(row.get(1)?),
@@ -425,6 +855,16 @@ fn read_item(row: &Row<'_>) -> rusqlite::Result<MediaItem> {
         meta_state: meta_from_str(&meta),
         field_locks: row.get(15)?,
         created_at: row.get(16)?,
+        external_code: row.get(17)?,
+        title_origin: row.get(18)?,
+        release_date: row.get(19)?,
+        detail_url: row.get(20)?,
+        trailer_file: row.get(21)?,
+        trailer_url: row.get(22)?,
+        trailer_fetched_at: row.get(23)?,
+        scraped_at: row.get(24)?,
+        scrape_state: scrape_from_str(&scrape),
+        scrape_error: row.get(26)?,
     })
 }
 

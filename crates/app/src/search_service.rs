@@ -7,6 +7,7 @@
 //! 因此新增一个标签维度不需要改动本文件的任何一行（硬约束 C6）。
 
 use std::collections::{BTreeMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cinema_domain::error::Result;
 use cinema_domain::model::{ItemId, MediaItem};
@@ -116,7 +117,16 @@ impl SearchService {
             decorated.push((key, SearchHit { item, tags }));
         }
 
-        decorated.sort_by(|a, b| compare_items(query.sort, &a.0, &b.0));
+        if query.sort == SortMode::Random {
+            // 「随机打乱」每次查询都重新洗牌：没有稳定顺序，刷新即换一批
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9e37_79b9_7f4a_7c15);
+            shuffle_in_place(&mut decorated, seed);
+        } else {
+            decorated.sort_by(|a, b| compare_items(query.sort, &a.0, &b.0));
+        }
         Ok(decorated.into_iter().map(|(_, hit)| hit).collect())
     }
 }
@@ -136,6 +146,20 @@ fn sort_key(store: &dyn SearchStore, item: &MediaItem, sort: SortMode) -> Result
         duration_ms: item.duration_ms,
         last_watched_at,
     })
+}
+
+/// Fisher–Yates 洗牌（xorshift 随机源）：随机排序每次查询都会得到新的顺序。
+fn shuffle_in_place<T>(slice: &mut [T], mut seed: u64) {
+    if seed == 0 {
+        seed = 0x9e37_79b9_7f4a_7c15;
+    }
+    for i in (1..slice.len()).rev() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let j = (seed % (i as u64 + 1)) as usize;
+        slice.swap(i, j);
+    }
 }
 
 #[cfg(test)]

@@ -51,7 +51,10 @@ impl Database {
 
     /// 执行所有待应用迁移，返回迁移后的版本号。
     pub fn migrate(&self) -> Result<i64> {
-        migration::MigrationRunner::run(&self.conn, &self.path, migration::MIGRATIONS)
+        let version = migration::MigrationRunner::run(&self.conn, &self.path, migration::MIGRATIONS)?;
+        // 已登记 version=3 的旧库不会重跑 0003：按列是否存在补齐一次
+        migration::ensure_metadata_schema(&self.conn)?;
+        Ok(version)
     }
 
     /// 当前 schema 版本。

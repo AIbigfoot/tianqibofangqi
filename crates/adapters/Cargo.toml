@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 cinema-domain = { workspace = true }
 serde_json = { version = "1" }
+ureq = { version = "2", features = ["tls", "gzip"] }
+scraper = { version = "0.21" }
+encoding_rs = { version = "0.8" }
 
 [dev-dependencies]
 # 集成测试需要直接引用领域类型与端口 trait

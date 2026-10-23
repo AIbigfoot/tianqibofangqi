@@ -88,9 +88,10 @@ impl TagDimensionDef {
     /// 检索组合逻辑作用于全部维度，因此检索代码无需改动（硬约束 C6）。
     pub fn builtin_defaults() -> Vec<TagDimensionDef> {
         use crate::tagging::{
-            DIM_CUSTOM, DIM_DURATION, DIM_QUALITY, DIM_REGION, DIM_SOURCE, DIM_SUBTITLE, DIM_WATCH,
-            DIM_YEAR, RULE_DURATION_BUCKET, RULE_RESOLUTION_TIER, RULE_SOURCE_SCOPE,
-            RULE_SUBTITLE_STATE, RULE_WATCH_STATE,
+            DIM_ACTOR, DIM_CATEGORY, DIM_CUSTOM, DIM_DIRECTOR, DIM_DURATION, DIM_MAKER,
+            DIM_QUALITY, DIM_REGION, DIM_SERIES, DIM_SOURCE, DIM_SUBTITLE, DIM_WATCH, DIM_YEAR,
+            RULE_DURATION_BUCKET, RULE_RESOLUTION_TIER, RULE_SOURCE_SCOPE, RULE_SUBTITLE_STATE,
+            RULE_WATCH_STATE,
         };
 
         vec![
@@ -104,6 +105,12 @@ impl TagDimensionDef {
             Self::builtin(DIM_WATCH, "观看状态", TagSource::Derived, 7, Some(RULE_WATCH_STATE)),
             Self::builtin(DIM_SUBTITLE, "字幕状态", TagSource::Derived, 8, Some(RULE_SUBTITLE_STATE)),
             Self::builtin(DIM_CUSTOM, "自定义标签", TagSource::User, 9, None),
+            // JavDB 刮削维度（PRD FR-03 之外，但复用同一套维度机制）
+            Self::builtin(DIM_CATEGORY, "类别", TagSource::Metadata, 10, None),
+            Self::builtin(DIM_SERIES, "系列", TagSource::Metadata, 11, None),
+            Self::builtin(DIM_MAKER, "片商", TagSource::Metadata, 12, None),
+            Self::builtin(DIM_DIRECTOR, "导演", TagSource::Metadata, 13, None),
+            Self::builtin(DIM_ACTOR, "演员", TagSource::Metadata, 14, None),
         ]
     }
 }

@@ -23,30 +23,42 @@ const DPR = window.devicePixelRatio || 1;
 
 const els = {};
 [
-  'add-btn', 'data-btn', 'online-btn', 'manage-btn', 'preview-toggle', 'stats',
-  'manage-modal', 'manage-list', 'manage-close',
+  'add-btn', 'data-btn', 'online-btn', 'manage-btn', 'meta-btn', 'preview-toggle', 'stats',
+  'manage-modal', 'manage-list', 'manage-close', 'manage-close-2',
+  'manage-summary', 'manage-source-count', 'manage-detail',
+  'meta-modal', 'meta-base', 'meta-cookie', 'meta-status', 'meta-save', 'meta-scrape-all', 'meta-close',
+  'llm-base', 'llm-key', 'llm-model', 'llm-status',
+  'llm-provider', 'llm-provider-model', 'llm-custom', 'llm-model-preset',
+  'meta-progress', 'meta-progress-text', 'meta-progress-pct', 'meta-progress-fill', 'meta-progress-current',
+  'detail-modal', 'detail-poster', 'detail-title', 'detail-meta', 'detail-tags',
+  'detail-play', 'detail-trailer', 'detail-refresh', 'detail-x', 'detail-state',
+  'detail-shots', 'detail-comments', 'trailer-stage', 'trailer-frame', 'lightbox', 'lightbox-img',
+  'trailer-controls', 'trailer-seek', 'trailer-time', 'trailer-close', 'player-backdrop',
   'data-modal', 'data-path', 'data-export', 'data-import', 'data-cancel',
   'scan-overlay', 'scan-title', 'scan-bar-fill', 'scan-detail', 'scan-current', 'scan-cancel',
   'online-modal', 'online-url', 'online-import', 'online-cancel', 'online-result',
-  'searchbar', 'search-input', 'filter-toggle', 'multi-toggle', 'sort-select', 'size-group', 'filter-bar', 'dims',
+  'searchbar', 'search-input', 'filter-toggle', 'tag-back', 'multi-toggle', 'sort-select', 'size-group', 'filter-bar', 'dims',
   'wall', 'empty', 'grid', 'sources',
   'select-bar', 'select-count', 'select-all', 'select-enter', 'select-remove', 'select-cancel',
   'multi-bar', 'layout-bar', 'multi-count', 'limit-select', 'concurrent-audio', 'browse-btn', 'exit-multi', 'multi-stage',
   'multi-exit-modal', 'exit-keep', 'exit-stop', 'exit-cancel',
   'resume-modal', 'resume-title', 'resume-desc', 'resume-continue', 'resume-restart', 'resume-cancel',
   'player-bar', 'pb-title', 'pb-toggle', 'pb-seek', 'pb-time', 'pb-close',
-  'pb-subtitle', 'pb-sublive', 'pb-add-multi',
+  'pb-subtitle', 'pb-sublive', 'pb-add-multi', 'pb-settings',
+  'player-settings', 'pset-close', 'pset-forward', 'pset-preview-delay', 'pset-preview-sound', 'pset-save',
+  'preview-stage', 'preview-frame', 'preview-controls', 'preview-title', 'preview-sound', 'preview-close',
   'subtitle-overlay', 'sub-origin', 'sub-translation',
-  'subtitle-menu', 'sm-close', 'sm-state', 'sm-tracks', 'sm-notice', 'sm-queue',
-  'sm-origin-lang', 'sm-target-lang', 'sm-display-group', 'sm-start', 'sm-save', 'sm-stop',
+  'subtitle-menu', 'sm-close', 'sm-state', 'sm-tracks', 'sm-notice',
+  'sm-online-query', 'sm-online-search', 'sm-online-status', 'sm-online-list',
   'subtitle-privacy', 'sub-privacy-note', 'sub-engine-list', 'sub-privacy-confirm', 'sub-privacy-cancel',
   'subtitle-failure', 'sub-failure-desc', 'sub-fail-external', 'sub-fail-dictation', 'sub-fail-close',
   'subtitle-external', 'sub-external-path', 'sub-external-confirm', 'sub-external-cancel',
   'preview-note', 'toast',
   // 主机模式（Console）
   'console', 'console-btn', 'c-top-stats', 'c-clock', 'c-search-btn', 'c-search', 'c-settings', 'c-to-classic',
-  'c-screen-home', 'c-screen-lib', 'c-hero', 'c-cover-row', 'c-chips', 'c-wide-row',
-  'c-chips-lib', 'c-grid', 'c-empty',
+  'c-screen-home', 'c-screen-lib', 'c-cover-row', 'c-chips', 'c-wide-row',
+  'c-rec-row', 'c-rec-status', 'c-rec-refresh',
+  'c-chips-lib', 'c-grid', 'c-empty', 'c-amb-a', 'c-amb-b', 'c-focus-title',
   'c-settings-panel', 'c-settings-close', 'c-preview-toggle', 'c-size-group', 'c-to-classic-2',
   // 顶栏（主机模式需整层隐藏）
   'topbar',
@@ -61,6 +73,8 @@ let paused = false;
 let tickTimer = null;
 let seeking = false;
 let currentDurationMs = 0;
+/** 最近一次已知播放位置（毫秒），快进以此为基准。 */
+let lastPositionMs = 0;
 /** 上一次已提示过的在线源故障，避免同一条故障每 400ms 弹一次。 */
 let lastFault = null;
 
@@ -76,7 +90,7 @@ let searchTimer = null;
 const TAG_PREVIEW = 12;
 
 /** 海报尺寸 → 网格最小列宽（CSS 像素）。 */
-const CARD_MIN_PX = { large: 216, mid: 168, small: 124 };
+const CARD_MIN_PX = { large: 640, mid: 520, small: 420 };
 
 // 悬停预览状态
 let hoverTimer = null;
@@ -84,6 +98,27 @@ let previewItemId = null;
 let previewStopTimer = null;
 let previewRect = null; // 物理像素 { x, y, w, h }
 let previewToken = 0;
+
+// 详情页预告片进度
+let trailerTickTimer = null;
+let trailerDurationMs = 0;
+let trailerSeeking = false;
+
+// 单路播放时画面底部额外留出的空间（CSS 像素），供字幕菜单 / 弹层显示
+let playerReserveCss = 0;
+
+// 控制条自动隐藏：播放中 3 秒无鼠标移动即收起，画面随之铺到窗口底部
+const PLAYER_BAR_IDLE_MS = 3000;
+let playerBarHidden = false;
+let playerBarHideTimer = null;
+/**
+ * 收起控制条会改变原生画面窗口的几何：窗口在指针下方被撑开时，系统会补发
+ * 「位置没变」的移动事件（页面层也会收到等价事件）。这个时间戳用于丢弃紧跟在
+ * 收起动作之后的这些假事件，否则控制条刚收起就被叫回来，画面来回闪。
+ */
+let playerBarWakeBlockUntil = 0;
+/** 已下发给后端的底部留出量（物理像素），避免重复调用。 */
+let playerSentReserve = 0;
 
 // 续播弹层
 let resumeItem = null;
@@ -235,8 +270,9 @@ function el(tag, className, text) {
   return node;
 }
 
-/** 维度面板里的取值标签：点击即筛选，再点一次取消（PRD FR-03「单标签点击」）。 */
-function tagChip(dim, name, count) {
+/** 维度面板里的取值标签：点击即筛选，再点一次取消（PRD FR-03「单标签点击」）。
+ *  `tag` 带 id 时右侧额外给一个全库删除入口（只删标签，不动视频文件）。 */
+function tagChip(dim, name, count, tag) {
   const on = (selected[dim.id] || []).includes(name);
   const chip = el('button', 'chip' + (on ? ' on' : ''));
   chip.type = 'button';
@@ -244,9 +280,46 @@ function tagChip(dim, name, count) {
   if (typeof count === 'number' && count > 0) {
     chip.appendChild(el('span', 'cnt', String(count)));
   }
+  if (tag && tag.id) {
+    const del = el('span', 'chip-del', '×');
+    del.title = `从全库删除标签「${name}」`;
+    del.addEventListener('click', (event) => {
+      // 删除是独立动作：不能顺带触发这个标签的筛选切换
+      event.stopPropagation();
+      deleteTagValue(dim, tag);
+    });
+    chip.appendChild(del);
+  }
   chip.title = `${dim.label} · ${name}`;
   chip.addEventListener('click', () => toggleTag(dim.id, name));
   return chip;
+}
+
+/** 全库删除一个标签取值：所有影片上的该标签一并移除。 */
+async function deleteTagValue(dim, tag) {
+  const ok = await confirmDialog(
+    '从全库删除标签？',
+    `将把「${dim.label} · ${tag.name}」从 ${tag.count || 0} 部影片上移除，并从标签清单里删除该取值。\n` +
+      '只删库内标签记录，不会删除任何视频文件。确定继续吗？',
+  );
+  if (!ok) {
+    return;
+  }
+  try {
+    const count = await invoke('delete_dimension_tag', { tagId: tag.id });
+    if (selected[dim.id]) {
+      selected[dim.id] = selected[dim.id].filter((value) => value !== tag.name);
+      if (!selected[dim.id].length) {
+        delete selected[dim.id];
+      }
+    }
+    renderFilterBar();
+    await reloadFilters();
+    await refresh();
+    showToast(`已删除标签「${tag.name}」，影响 ${count} 部影片`);
+  } catch (err) {
+    showToast(String(err));
+  }
 }
 
 /** 已选标签条 / 空状态里的移除入口。 */
@@ -326,7 +399,7 @@ function renderDims() {
     const expanded = expandedDims.has(dim.id);
     const visible = expanded ? tags : tags.slice(0, TAG_PREVIEW);
     for (const tag of visible) {
-      body.appendChild(tagChip(dim, tag.name, tag.count));
+      body.appendChild(tagChip(dim, tag.name, tag.count, tag));
     }
     // 已选但当前清单里已不存在的取值照样显示：不自动放宽条件
     for (const value of selected[dim.id] || []) {
@@ -440,11 +513,18 @@ const coverCache = new Map();
  * 列表页卡片逐张下载），所以每张卡片可以各自独立重试、不必串行排队：请求本身很廉价，
  * 第一次没命中会顺手挂起一次「按源抓封面」，之后各卡片陆续能拿到。
  */
+/** 封面加载后保持卡片横版铺满，不再按图片比例改写卡片尺寸。 */
+function fitCardToPoster(img) {
+  // 横版卡固定 16:9，由 CSS 决定；这里保留空实现只用于兼容旧调用点。
+  void img;
+}
+
 function loadCover(itemId, img) {
   (async () => {
     const cached = coverCache.get(itemId);
     if (cached) {
       img.src = cached;
+      fitCardToPoster(img);
       return;
     }
     // 后台按源抓封面是**串行**的（一次列表页 ≈ 每张 1~3s），整页几十张可能耗时两三分钟，
@@ -463,6 +543,11 @@ function loadCover(itemId, img) {
         if (img.isConnected) {
           coverCache.set(itemId, src);
           img.src = src;
+          fitCardToPoster(img);
+          // 主机模式环境底正展示该条目：封面刚到就立刻替换渐变兜底
+          if (consoleOn && consoleAmbientId === itemId) {
+            paintConsoleAmbient(consoleItemById(itemId), true);
+          }
         }
         return;
       }
@@ -485,7 +570,7 @@ function buildCard(item) {
   const card = document.createElement('div');
   card.className = 'card' + (item.missing ? ' missing' : '');
   card.dataset.id = item.id;
-  card.title = item.title;
+  card.title = `${item.title}（单击查看详情：封面 / 截图 / 标签 / 评论 / 预告片）`;
 
   const poster = document.createElement('div');
   poster.className = 'poster';
@@ -543,12 +628,54 @@ function buildCard(item) {
 
   card.addEventListener('mouseenter', () => {
     if (selectMode) return; // 多选态只为挑选，不触发悬停预览
+    if (!consoleOn) {
+      applyClassicFocus(card);
+    }
     scheduleHover(item, card);
   });
-  card.addEventListener('mouseleave', cancelHover);
+  card.addEventListener('mouseleave', () => {
+    if (!consoleOn) {
+      clearClassicFocus(card);
+    }
+    cancelHover();
+    if (consoleOn) {
+      cancelConsolePreview();
+    }
+  });
   card.addEventListener('click', () => onCardClick(item));
 
   return card;
+}
+
+/** 经典模式：鼠标所在卡放大，左右各两张后退压暗（与主机模式同一套观感）。 */
+function applyClassicFocus(card) {
+  const parent = card.parentElement;
+  if (!parent) {
+    return;
+  }
+  const peers = Array.from(parent.children).filter((n) => n.classList.contains('card'));
+  const at = peers.indexOf(card);
+  peers.forEach((peer, i) => {
+    peer.classList.toggle('focused', peer === card);
+    peer.classList.toggle('near', peer !== card && Math.abs(i - at) <= 2);
+  });
+}
+
+function clearClassicFocus(card) {
+  // 焦点已被别的卡接管时不要误清（快速划过相邻卡会先 leave 后 enter）
+  if (!card.classList.contains('focused')) {
+    return;
+  }
+  const parent = card.parentElement;
+  if (!parent) {
+    return;
+  }
+  for (const peer of parent.children) {
+    if (peer.classList && peer.classList.contains('card')) {
+      peer.classList.remove('focused');
+      peer.classList.remove('near');
+    }
+  }
 }
 
 /** 单张海报的选中态与序号（多选态下可见）。 */
@@ -559,7 +686,7 @@ function markSelected(card, item) {
   if (pick) pick.textContent = at >= 0 ? String(at + 1) : '';
 }
 
-/** 海报点击分三种语义：多选态挑片、多屏浏览库时加入空位、否则进入单路播放。 */
+/** 海报点击分三种语义：多选态挑片、多屏浏览库时加入空位、否则打开详情页。 */
 function onCardClick(item) {
   if (selectMode) {
     toggleSelect(item);
@@ -569,7 +696,7 @@ function onCardClick(item) {
     addCardToMulti(item);
     return;
   }
-  openItem(item);
+  openDetail(item);
 }
 
 function flag(kind, text) {
@@ -583,12 +710,32 @@ function flag(kind, text) {
 // 悬停预览（PRD FR-02）
 // ---------------------------------------------------------------------------
 
+/** 预览舞台（CSS 矩形）：居中放大，面积 ≥ 1/4 全屏（0.62 × 0.62 ≈ 38%）。 */
+function previewStageRect() {
+  const w = Math.round(window.innerWidth * 0.62);
+  const h = Math.round(window.innerHeight * 0.62);
+  return {
+    left: Math.round((window.innerWidth - w) / 2),
+    top: Math.round((window.innerHeight - h) / 2),
+    width: w,
+    height: h,
+  };
+}
+
+/** 海报/焦点卡的位置（CSS），用于「预览不可用」提示与指针离开判定。 */
+let previewAnchorRect = null;
+
 function scheduleHover(item, card) {
   cancelHover();
   if (consoleOn) {
-    return; // 主机模式不做悬停预览：鼠标语义在大屏导航下失效，且预览与多屏共享解码额度
+    // 主机模式同样允许鼠标停留预览：先把焦点落到该卡，再走焦点停留计时
+    focusConsoleNode(card);
+    return;
   }
-  hoverTimer = setTimeout(() => startPreview(item, card), constants.previewTriggerMs);
+  if (playingId) {
+    return;
+  }
+  hoverTimer = setTimeout(() => startPreview(item, card), previewDelayMs());
 }
 
 function cancelHover() {
@@ -606,11 +753,13 @@ async function startPreview(item, card) {
     showPreviewNote(card, '多屏播放期间不提供悬停预览');
     return;
   }
-  const rect = card.getBoundingClientRect();
-  const x = toPhysical(rect.left);
-  const y = toPhysical(rect.top);
-  const width = toPhysical(rect.width);
-  const height = toPhysical(rect.height);
+  // 画面固定在屏幕中央放大展示，不再贴合海报卡片
+  const stage = previewStageRect();
+  const x = toPhysical(stage.left);
+  const y = toPhysical(stage.top);
+  const width = toPhysical(stage.width);
+  const height = toPhysical(stage.height);
+  const cardRect = card ? card.getBoundingClientRect() : null;
 
   const token = (previewToken += 1);
   let result;
@@ -628,6 +777,7 @@ async function startPreview(item, card) {
   if (!result.started) {
     previewItemId = null;
     previewRect = null;
+    previewAnchorRect = null;
     // 拒绝不是静默失败：在海报浮层标注原因（PRD FR-02 / §11）
     if (result.reason && !String(result.reason).includes('关闭')) {
       showPreviewNote(card, result.reason);
@@ -637,8 +787,74 @@ async function startPreview(item, card) {
 
   previewItemId = item.id;
   previewRect = { x, y, w: width, h: height };
+  previewAnchorRect = cardRect;
+  renderPreviewStage(item, stage);
+  // 预览偏好：声音开关（默认静音）；随机片段避开片头
+  invoke('set_preview_sound', { enabled: previewSoundOn }).catch(() => {});
+  startPreviewRandomSegment(token);
   clearTimeout(previewStopTimer);
   previewStopTimer = setTimeout(stopPreview, constants.previewSegmentMs);
+}
+
+/** 展开预览舞台的 HTML 层：四周暗底、描边框与画面下方控制条。 */
+function renderPreviewStage(item, stage) {
+  els['preview-stage'].classList.remove('hidden');
+  els['preview-title'].textContent = item.title || '—';
+  const frame = els['preview-frame'];
+  frame.style.left = `${stage.left - 4}px`;
+  frame.style.top = `${stage.top - 4}px`;
+  frame.style.width = `${stage.width + 8}px`;
+  frame.style.height = `${stage.height + 8}px`;
+  const controls = els['preview-controls'];
+  controls.style.left = `${stage.left}px`;
+  controls.style.top = `${stage.top + stage.height + 14}px`;
+  controls.style.width = `${stage.width}px`;
+  updatePreviewSoundUi();
+}
+
+function updatePreviewSoundUi() {
+  els['preview-sound'].textContent = previewSoundOn ? '声音：开' : '声音：关';
+  els['preview-sound'].classList.toggle('primary', previewSoundOn);
+}
+
+/** 预览声音开关：即时下发到预览实例，并记住本机偏好。 */
+function togglePreviewSound() {
+  previewSoundOn = !previewSoundOn;
+  try {
+    localStorage.setItem(PREVIEW_SOUND_KEY, previewSoundOn ? '1' : '0');
+  } catch (err) {
+    /* 存储不可用时仅本次生效 */
+  }
+  invoke('set_preview_sound', { enabled: previewSoundOn }).catch(() => {});
+  updatePreviewSoundUi();
+}
+
+/**
+ * 随机片段：预览实例装载完成后读到真实时长，再跳到一个随机位置。
+ * 本地预告片与整片共用同一实例，这里不假设素材类型。
+ */
+let previewRandomTimer = null;
+
+function startPreviewRandomSegment(token) {
+  clearTimeout(previewRandomTimer);
+  let tries = 0;
+  const probe = async () => {
+    if (token !== previewToken || !previewItemId) return;
+    try {
+      const status = await invoke('trailer_status');
+      if (status && status.active && status.durationMs > 8000) {
+        const span = Math.max(0, status.durationMs - 6000);
+        const target = Math.floor(span * (0.1 + Math.random() * 0.7));
+        await invoke('trailer_seek', { positionMs: target });
+        return;
+      }
+    } catch (err) {
+      /* 属性暂不可读：继续重试 */
+    }
+    tries += 1;
+    if (tries < 20) previewRandomTimer = setTimeout(probe, 250);
+  };
+  previewRandomTimer = setTimeout(probe, 300);
 }
 
 /** 在对应海报上方标注「预览不可用」的原因；不做重试、不抢占正在播放的窗口。 */
@@ -660,18 +876,69 @@ function hidePreviewNote() {
 
 function stopPreview() {
   cancelHover();
+  cancelConsolePreview();
   clearTimeout(previewStopTimer);
   previewStopTimer = null;
+  clearTimeout(previewRandomTimer);
+  previewRandomTimer = null;
+  stopTrailerTick();
+  els['trailer-stage'].classList.add('hidden');
+  els['preview-stage'].classList.add('hidden');
   previewToken += 1;
   const wasActive = previewItemId !== null;
   previewItemId = null;
   previewRect = null;
+  previewAnchorRect = null;
   if (wasActive) {
     invoke('stop_preview').catch(() => {});
   }
 }
 
-/** 指针已不在预览矩形内（画面窗口挡住了指针，重新收到事件即意味着离开了）。 */
+/** 预告片心跳：读取预览实例进度，推进画面下方的进度条。 */
+function startTrailerTick() {
+  stopTrailerTick();
+  trailerDurationMs = 0;
+  trailerSeeking = false;
+  els['trailer-seek'].value = 0;
+  els['trailer-time'].textContent = '00:00 / --:--';
+  trailerTickTimer = setInterval(pollTrailer, 400);
+}
+
+function stopTrailerTick() {
+  if (trailerTickTimer) {
+    clearInterval(trailerTickTimer);
+    trailerTickTimer = null;
+  }
+}
+
+async function pollTrailer() {
+  if (!previewItemId) {
+    return;
+  }
+  let status;
+  try {
+    status = await invoke('trailer_status');
+  } catch (err) {
+    return;
+  }
+  if (!status || !status.active) {
+    stopPreview();
+    return;
+  }
+  trailerDurationMs = status.durationMs || trailerDurationMs;
+  if (!trailerSeeking && trailerDurationMs > 0) {
+    els['trailer-seek'].value = Math.round((status.positionMs / trailerDurationMs) * 1000);
+  }
+  els['trailer-time'].textContent = `${formatTime(status.positionMs)} / ${
+    trailerDurationMs ? formatTime(trailerDurationMs) : '--:--'
+  }`;
+  // 播完自动收起，避免停在黑屏上等 5 分钟兜底
+  if (trailerDurationMs > 0 && status.positionMs >= trailerDurationMs - 300) {
+    stopPreview();
+  }
+}
+
+/** 指针已不在预览舞台、也不在触发预览的卡片内（画面窗口挡住了指针，重新收到事件即意味着离开了）。 */
 function pointerOutsidePreview(event) {
   if (!previewRect) {
     return false;
@@ -679,12 +946,47 @@ function pointerOutsidePreview(event) {
   const px = toPhysical(event.clientX);
   const py = toPhysical(event.clientY);
   const tol = 2;
-  return (
-    px < previewRect.x - tol ||
-    py < previewRect.y - tol ||
-    px > previewRect.x + previewRect.w + tol ||
-    py > previewRect.y + previewRect.h + tol
-  );
+  const inRect = (rect) =>
+    !!rect &&
+    px >= rect.x - tol &&
+    py >= rect.y - tol &&
+    px <= rect.x + rect.w + tol &&
+    py <= rect.y + rect.h + tol;
+  if (inRect(previewRect)) {
+    return false;
+  }
+  // 放大舞台下方还有一段 HTML 控制条（声音 / 收起），介于画面与按钮之间的
+  // 间隙也算交互区，否则指针移向按钮的途中预览就被收起了。
+  const stage = els['preview-stage'];
+  if (stage && !stage.classList.contains('hidden')) {
+    const frame = els['preview-frame'];
+    const controls = els['preview-controls'];
+    if (frame && controls) {
+      const fr = frame.getBoundingClientRect();
+      const cr = controls.getBoundingClientRect();
+      const left = Math.min(fr.left, cr.left);
+      const right = Math.max(fr.right, cr.right);
+      const zone = {
+        x: toPhysical(left),
+        y: toPhysical(fr.top),
+        w: toPhysical(right - left),
+        h: toPhysical(cr.bottom - fr.top),
+      };
+      if (inRect(zone)) {
+        return false;
+      }
+    }
+  }
+  if (previewAnchorRect) {
+    const ax = toPhysical(previewAnchorRect.left);
+    const ay = toPhysical(previewAnchorRect.top);
+    const aw = toPhysical(previewAnchorRect.width);
+    const ah = toPhysical(previewAnchorRect.height);
+    if (inRect({ x: ax, y: ay, w: aw, h: ah })) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -738,16 +1040,26 @@ async function play(itemId, startMs, item) {
 
   playingId = itemId;
   paused = false;
+  playerReserveCss = 0;
   currentDurationMs = status.durationMs || 0;
+  lastPositionMs = status.positionMs || 0;
+  els['player-settings'].classList.add('hidden');
   els['pb-title'].textContent = item ? item.title : (items.find((i) => i.id === itemId) || {}).title || '—';
-  els['pb-toggle'].textContent = '暂停';
+  setPlayIcon(false);
   els['pb-seek'].value = 0;
   updateTimeUi(status.positionMs || 0, currentDurationMs);
+  els['player-backdrop'].classList.remove('hidden');
   els['player-bar'].classList.remove('hidden');
+  playerBarHidden = false;
+  els['player-bar'].classList.remove('bar-auto-hidden');
+  playerSentReserve = 0;
   applyView();
   startTick();
+  // 画面比例决定字幕应贴在画面内底部还是窗口底部，首帧后读取
+  watchVideoAspect();
   // 打开成功后取入口可见性 + 已存轨道：有外挂/生成轨道时按其句时间轴复用渲染
   await initSubtitleForItem(itemId);
+  revealPlayerBar();
 }
 
 /** 统一心跳：单路走 `tick`，多屏走 `multi_status`（两者都由后端顺带落库进度）。 */
@@ -787,6 +1099,7 @@ async function tick() {
     lastFault = null;
   }
   currentDurationMs = status.durationMs || currentDurationMs;
+  lastPositionMs = status.positionMs || 0;
   if (!seeking && currentDurationMs > 0) {
     els['pb-seek'].value = Math.round((status.positionMs / currentDurationMs) * 1000);
   }
@@ -807,12 +1120,162 @@ function updateTimeUi(positionMs, durationMs) {
   els['pb-time'].textContent = `${formatTime(positionMs)} / ${durationMs ? formatTime(durationMs) : '--:--'}`;
 }
 
+// ---- 播放器设置：快进 / 预览偏好（localStorage，本机生效） ----
+
+const FORWARD_KEY = 'cinema.forwardSeconds';
+const PREVIEW_DELAY_KEY = 'cinema.previewDelaySeconds';
+const PREVIEW_SOUND_KEY = 'cinema.previewSound';
+
+function readNumberPref(key, fallback, min, max) {
+  let value = fallback;
+  try {
+    const raw = Number(localStorage.getItem(key));
+    if (Number.isFinite(raw) && raw > 0) value = raw;
+  } catch (err) {
+    /* 存储不可用时用默认值 */
+  }
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function readBoolPref(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : raw === '1';
+  } catch (err) {
+    return fallback;
+  }
+}
+
+let forwardSeconds = readNumberPref(FORWARD_KEY, 10, 1, 600);
+let previewDelaySeconds = readNumberPref(PREVIEW_DELAY_KEY, 5, 1, 60);
+let previewSoundOn = readBoolPref(PREVIEW_SOUND_KEY, false);
+
+function previewDelayMs() {
+  return previewDelaySeconds * 1000;
+}
+
+function fillPlayerSettings() {
+  els['pset-forward'].value = String(forwardSeconds);
+  els['pset-preview-delay'].value = String(previewDelaySeconds);
+  els['pset-preview-sound'].checked = previewSoundOn;
+}
+
+function savePlayerSettings() {
+  const fwd = Number(els['pset-forward'].value);
+  const delay = Number(els['pset-preview-delay'].value);
+  if (!Number.isFinite(fwd) || fwd < 1 || fwd > 600) {
+    showToast('快进时长需在 1–600 秒之间');
+    return;
+  }
+  if (!Number.isFinite(delay) || delay < 1 || delay > 60) {
+    showToast('预览停留需在 1–60 秒之间');
+    return;
+  }
+  forwardSeconds = Math.round(fwd);
+  previewDelaySeconds = Math.round(delay);
+  previewSoundOn = !!els['pset-preview-sound'].checked;
+  try {
+    localStorage.setItem(FORWARD_KEY, String(forwardSeconds));
+    localStorage.setItem(PREVIEW_DELAY_KEY, String(previewDelaySeconds));
+    localStorage.setItem(PREVIEW_SOUND_KEY, previewSoundOn ? '1' : '0');
+  } catch (err) {
+    /* 存储不可用时仅本次生效 */
+  }
+  closePlayerSettings();
+  showToast('播放器设置已保存');
+}
+
+function openPlayerSettings() {
+  fillPlayerSettings();
+  revealPlayerBar();
+  els['player-settings'].classList.remove('hidden');
+  syncPlayerPanels();
+}
+
+function closePlayerSettings() {
+  if (els['player-settings'].classList.contains('hidden')) return;
+  els['player-settings'].classList.add('hidden');
+  syncPlayerPanels();
+}
+
+// ---- 控制条自动隐藏：鼠标静止 3 秒后收起，画面铺满窗口；移动立即唤醒 ----
+
+function revealPlayerBar() {
+  if (!playingId) return;
+  if (playerBarHidden) {
+    playerBarHidden = false;
+    els['player-bar'].classList.remove('bar-auto-hidden');
+    syncPlayerPanels();
+  }
+  schedulePlayerBarHide();
+  updateSubtitleStage();
+}
+
+function schedulePlayerBarHide() {
+  clearTimeout(playerBarHideTimer);
+  playerBarHideTimer = null;
+  if (!playingId || inMulti) return;
+  playerBarHideTimer = setTimeout(() => {
+    playerBarHideTimer = null;
+    if (!playingId || inMulti) return;
+    // 面板还开着时保持控制条可见，等面板收起后重新计时
+    if (panelReserveCss() > 0) {
+      schedulePlayerBarHide();
+      return;
+    }
+    playerBarHidden = true;
+    // 收起本身会撑开原生画面窗口，可能引发一批「位置没变」的移动事件；
+    // 短暂屏蔽这些事件，避免收起→唤醒→再收起的死循环（表现为画面闪动、控制条不消失）
+    playerBarWakeBlockUntil = Date.now() + 700;
+    els['player-bar'].classList.add('bar-auto-hidden');
+    updateSubtitleStage();
+    syncPlayerPanels();
+  }, PLAYER_BAR_IDLE_MS);
+}
+
+async function forwardBy(seconds) {
+  if (!playingId || inMulti) return;
+  const delta = Math.round(Number(seconds) * 1000);
+  if (!delta) return;
+  const base = Math.max(0, lastPositionMs || 0);
+  let target = base + delta;
+  if (currentDurationMs > 0) {
+    // 贴近片尾时停在片尾前，避免 seek 到总时长直接触发结束
+    target = Math.min(target, Math.max(base, currentDurationMs - 500));
+  }
+  try {
+    await invoke('seek', { positionMs: target });
+  } catch (err) {
+    showToast(String(err));
+    return;
+  }
+  lastPositionMs = target;
+  if (currentDurationMs > 0) {
+    els['pb-seek'].value = Math.round((target / currentDurationMs) * 1000);
+  }
+  updateTimeUi(target, currentDurationMs);
+  // seek 丢弃旧句：清空本地累积的句子与复用轨道当前句（与拖动进度条一致）
+  resetSubtitleText(null);
+  renderSubtitleLines(null);
+}
+
+const ICON_PAUSE =
+  '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect></svg>';
+const ICON_PLAY =
+  '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"></path></svg>';
+
+/** 播放/暂停按钮用图标表达：两根竖线=暂停中，三角=播放中。 */
+function setPlayIcon(isPaused) {
+  els['pb-toggle'].innerHTML = isPaused ? ICON_PLAY : ICON_PAUSE;
+  els['pb-toggle'].title = isPaused ? '播放' : '暂停';
+}
+
 async function togglePause() {
   if (!playingId) {
     return;
   }
   paused = !paused;
-  els['pb-toggle'].textContent = paused ? '播放' : '暂停';
+  setPlayIcon(paused);
   try {
     await invoke('set_paused', { paused });
   } catch (err) {
@@ -828,9 +1291,19 @@ async function closePlayer() {
   hideSubtitleUi();
   const id = playingId;
   playingId = null;
+  playerReserveCss = 0;
   currentDurationMs = 0;
+  lastPositionMs = 0;
   lastFault = null;
+  els['player-backdrop'].classList.add('hidden');
   els['player-bar'].classList.add('hidden');
+  els['player-settings'].classList.add('hidden');
+  clearTimeout(playerBarHideTimer);
+  playerBarHideTimer = null;
+  playerBarHidden = false;
+  els['player-bar'].classList.remove('bar-auto-hidden');
+  playerSentReserve = 0;
+  resetVideoAspect();
   applyView();
   refreshSubtitleUi();
   try {
@@ -845,6 +1318,10 @@ async function closePlayer() {
   }
   // 若此前处于主机模式，播放结束后让主机层按当前状态回归
   syncConsole();
+  // 主机模式播放中退出（窗口尚未还原）时，等播放页关闭后再把窗口还原
+  if (!consoleOn) {
+    setConsoleWindowMode(false);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,11 +1500,550 @@ async function scanSource(source) {
 }
 
 // ---------------------------------------------------------------------------
-// 库管理：按源查看条目数并整源清除（只删库内记录，不删硬盘文件）
+// 元数据刮削（P-06）：数据源设置 / 条目详情 / 预告片 / 批量补齐
 // ---------------------------------------------------------------------------
+
+let detailItem = null;
+/** 详情请求序号：重开或重抓时丢弃过期响应，避免旧数据覆盖新画面。 */
+let detailSeq = 0;
+
+/** 用户点「补齐全库」触发的批处理：用于把 scrape-progress 事件只落到这条进度条上。 */
+let scrapeBatchActive = false;
+let scrapeBatchDone = 0;
+let scrapeBatchTotal = 0;
+
+async function openMetaModal() {
+  els['meta-modal'].classList.remove('hidden');
+  els['meta-cookie'].value = '';
+  els['meta-status'].textContent = '正在读取数据源设置…';
+  // 上次补齐结果不跨次保留：非补齐中时清空进度块
+  if (!scrapeBatchActive) {
+    els['meta-progress'].classList.add('hidden');
+    els['meta-progress-fill'].style.width = '0%';
+    els['meta-progress-pct'].textContent = '0%';
+    els['meta-progress-current'].textContent = '';
+  }
+  try {
+    const view = await invoke('javdb_settings');
+    applyMetaView(view);
+  } catch (err) {
+    els['meta-status'].textContent = String(err);
+  }
+  try {
+    applyLlmView(await invoke('llm_settings'));
+  } catch (err) {
+    els['llm-status'].textContent = String(err);
+  }
+}
+
+/** 推荐行的快捷入口：退出主机模式，打开「元数据」并聚焦大模型密钥输入。 */
+async function openLlmSettings() {
+  if (consoleOn) {
+    exitConsole();
+  }
+  await openMetaModal();
+  const key = els['llm-key'];
+  if (key) {
+    key.scrollIntoView({ block: 'center' });
+    key.focus();
+  }
+}
+
+/** 预置服务商：接口地址与可选模型由程序固化，用户只需选服务商 + 填密钥。 */
+const LLM_PROVIDERS = {
+  deepseek: {
+    baseUrl: 'https://api.deepseek.com/v1',
+    models: ['deepseek-chat', 'deepseek-reasoner'],
+  },
+  openai: {
+    baseUrl: 'https://api.openai.com/v1',
+    models: ['gpt-4o-mini', 'gpt-4o'],
+  },
+};
+
+/** 切换服务商：预置服务商自动填地址、给出模型下拉；「自定义」才显示手填项。 */
+function applyLlmProvider(provider, model) {
+  const preset = LLM_PROVIDERS[provider];
+  els['llm-provider'].value = preset ? provider : 'custom';
+  els['llm-custom'].classList.toggle('hidden', !!preset);
+  els['llm-model-preset'].classList.toggle('hidden', !preset);
+  const select = els['llm-provider-model'];
+  select.replaceChildren();
+  if (!preset) {
+    return;
+  }
+  els['llm-base'].value = preset.baseUrl;
+  const models = preset.models.slice();
+  if (model && !models.includes(model)) {
+    models.push(model);
+  }
+  for (const name of models) {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = name;
+    select.appendChild(option);
+  }
+  select.value = model && models.includes(model) ? model : preset.models[0];
+}
+
+/** 大模型配置回填：只回报是否已保存密钥，不回显密钥本身。 */
+function applyLlmView(view) {
+  els['llm-base'].value = view.baseUrl || '';
+  els['llm-model'].value = view.model || '';
+  els['llm-key'].value = '';
+  els['llm-key'].placeholder = view.hasKey ? '已保存密钥（留空表示保持不变）' : '粘贴服务商的 API Key';
+  applyLlmProvider(view.provider || 'deepseek', view.model);
+  els['llm-status'].textContent = view.hasKey
+    ? '已配置密钥：推荐看点由大模型总结'
+    : '未配置密钥：推荐看点按高赞评论本地提炼';
+}
+
+function applyMetaView(view) {
+  els['meta-base'].value = view.baseUrl || '';
+  els['meta-cookie'].value = '';
+  els['meta-cookie'].placeholder = view.hasCookie
+    ? '已保存 Cookie（留空表示保持不变）'
+    : '粘贴浏览器请求头里的 Cookie 整行';
+  const who = view.username ? `（${view.username}）` : '';
+  els['meta-status'].textContent = view.message || (view.loggedIn ? `已登录${who}` : '未登录');
+}
+
+async function saveMetaSettings() {
+  els['meta-save'].disabled = true;
+  els['meta-status'].textContent = '正在验证…';
+  try {
+    const view = await invoke('save_javdb_settings', {
+      baseUrl: els['meta-base'].value,
+      cookie: els['meta-cookie'].value,
+    });
+    applyMetaView(view);
+    showToast(view.loggedIn ? `数据源已连接${view.username ? `：${view.username}` : ''}` : '设置已保存');
+  } catch (err) {
+    els['meta-status'].textContent = String(err);
+    showToast(String(err));
+  }
+  // 推荐看点的大模型配置与数据源一起保存；密钥留空表示保留已保存的值
+  try {
+    const provider = els['llm-provider'].value;
+    const llmView = await invoke('save_llm_settings', {
+      provider,
+      baseUrl: els['llm-base'].value,
+      apiKey: els['llm-key'].value,
+      model: provider === 'custom'
+        ? els['llm-model'].value
+        : els['llm-provider-model'].value,
+    });
+    applyLlmView(llmView);
+    // 配置完成后立刻在后台拉取首批推荐：回到主机模式即可直接看到，不必再点「换一批」
+    if (llmView.hasKey) {
+      consoleRecLoaded = false;
+      loadConsoleRecommendations();
+    }
+  } catch (err) {
+    els['llm-status'].textContent = String(err);
+  } finally {
+    els['meta-save'].disabled = false;
+  }
+}
+
+/** 进度事件 → 进度条：总数、已处理、百分比与当前条目标题。 */
+function updateScrapeProgress(payload) {
+  if (!scrapeBatchActive) {
+    return;
+  }
+  const total = Number(payload.total) || 0;
+  const done = Number(payload.done) || 0;
+  scrapeBatchDone = done;
+  scrapeBatchTotal = total;
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  els['meta-progress'].classList.remove('hidden');
+  els['meta-progress-fill'].style.width = `${pct}%`;
+  els['meta-progress-pct'].textContent = `${pct}%`;
+  els['meta-progress-text'].textContent = total
+    ? `正在补齐元数据：${done} / ${total}`
+    : '正在读取待补齐条目…';
+  const item = consoleItemById(payload.itemId) || items.find((i) => i.id === payload.itemId);
+  els['meta-progress-current'].textContent = item ? item.title : payload.itemId || '';
+}
+
+/** 批量补齐：不指定源则补齐全库中待刮削 / 上次失败的条目；批处理期间显示进度条。 */
+async function scrapeMissing(sourceId) {
+  if (scrapeBatchActive) {
+    return;
+  }
+  scrapeBatchActive = true;
+  scrapeBatchDone = 0;
+  scrapeBatchTotal = 0;
+  els['meta-progress'].classList.remove('hidden');
+  els['meta-progress-fill'].style.width = '0%';
+  els['meta-progress-pct'].textContent = '0%';
+  els['meta-progress-text'].textContent = '正在读取待补齐条目…';
+  els['meta-progress-current'].textContent = '';
+  els['meta-scrape-all'].disabled = true;
+  els['meta-scrape-all'].textContent = '补齐中…';
+  let aborted = false;
+  try {
+    const count = await invoke('scrape_missing', sourceId ? { sourceId } : {});
+    coverCache.clear();
+    showToast(count ? `已刮削 ${count} 条元数据` : '没有待刮削的条目');
+    await refresh();
+    await reloadFilters();
+  } catch (err) {
+    aborted = true;
+    showToast(String(err));
+    els['meta-progress-text'].textContent = '补齐中止';
+  } finally {
+    scrapeBatchActive = false;
+    els['meta-scrape-all'].disabled = false;
+    els['meta-scrape-all'].textContent = '补齐全库';
+    // 收尾：成功时把条推到 100%，失败则保留已跑到位置供排查
+    if (!aborted) {
+      els['meta-progress-fill'].style.width = '100%';
+      els['meta-progress-pct'].textContent = '100%';
+      els['meta-progress-text'].textContent = scrapeBatchTotal
+        ? `补齐完成 · 已处理 ${scrapeBatchDone} / ${scrapeBatchTotal}`
+        : '没有待补齐的条目';
+      els['meta-progress-current'].textContent = '';
+    }
+  }
+}
+
+function scrapeStateText(data) {
+  switch (data.scrapeState) {
+    case 'done':
+      return '元数据已从数据源同步';
+    case 'running':
+      return '正在刮削…';
+    case 'failed':
+      return `上次刮削失败：${data.scrapeError || '未知原因'}`;
+    case 'no_code':
+      return `未能识别番号：${data.scrapeError || '请重命名文件后重试'}`;
+    default:
+      return '尚未刮削：点「从数据源更新」按番号抓取';
+  }
+}
+
+async function openDetail(item) {
+  stopPreview();
+  detailItem = item;
+  const seq = (detailSeq += 1);
+  els['detail-modal'].classList.remove('hidden');
+  els['detail-title'].textContent = item.title;
+  els['detail-meta'].textContent = '正在读取元数据…';
+  els['detail-state'].textContent = '';
+  els['detail-trailer'].disabled = true;
+  els['detail-poster'].replaceChildren();
+  els['detail-tags'].replaceChildren();
+  els['detail-shots'].replaceChildren();
+  els['detail-comments'].replaceChildren();
+  await loadDetail(item.id, seq);
+}
+
+function hideDetail() {
+  els['detail-modal'].classList.add('hidden');
+  detailItem = null;
+  detailSeq += 1;
+  stopPreview();
+}
+
+/** 标签跳转前保存的页面状态：返回时原样恢复（含主机模式焦点与滚动位置）。 */
+let tagNav = null;
+
+/** 详情页标签 → 该标签下的影片列表；「← 返回」回到详情页，原列表状态不丢。 */
+async function openTagBrowse(label, value) {
+  const dim = dims.find((d) => d.label === label);
+  const screenEl = consoleOn
+    ? (consoleScreen === 'home' ? els['c-screen-home'] : els['c-screen-lib'])
+    : null;
+  tagNav = {
+    item: detailItem,
+    selected: JSON.parse(JSON.stringify(selected)),
+    searchText,
+    sortTag,
+    wallScroll: els.wall.scrollTop,
+    console: consoleOn,
+    consoleScreen,
+    focus: { ...consoleFocus },
+    consoleScroll: screenEl ? screenEl.scrollTop : 0,
+  };
+  hideDetail();
+  if (consoleOn) {
+    exitConsole();
+  }
+  if (dim) {
+    // 精确按该维度筛选；清空其它条件，避免「查不到」的困惑
+    selected = { [dim.id]: [value] };
+    searchText = '';
+  } else {
+    selected = {};
+    searchText = value;
+  }
+  els['search-input'].value = searchText;
+  els['sort-select'].value = sortTag;
+  renderFilterBar();
+  renderDims();
+  els['tag-back'].classList.remove('hidden');
+  await refresh();
+  els.wall.scrollTop = 0;
+}
+
+async function backFromTagBrowse() {
+  if (!tagNav) {
+    return;
+  }
+  const saved = tagNav;
+  tagNav = null;
+  selected = saved.selected;
+  searchText = saved.searchText;
+  sortTag = saved.sortTag;
+  els['search-input'].value = searchText;
+  els['sort-select'].value = sortTag;
+  renderFilterBar();
+  renderDims();
+  els['tag-back'].classList.add('hidden');
+  await refresh();
+  els.wall.scrollTop = saved.wallScroll;
+  if (saved.console) {
+    consoleFocus = saved.focus;
+    await enterConsole();
+    // enterConsole 默认回首页；原来是资源库时切回去并恢复焦点
+    if (saved.consoleScreen !== 'home') {
+      consoleScreen = saved.consoleScreen;
+      consoleFocus = saved.focus;
+      renderConsole();
+    }
+    const screenEl = saved.consoleScreen === 'home' ? els['c-screen-home'] : els['c-screen-lib'];
+    screenEl.scrollTop = saved.consoleScroll;
+  }
+  // 回到详情页本身，用户可继续看元数据，再点 × 回到原列表
+  if (saved.item) {
+    openDetail(saved.item);
+  }
+}
+
+async function loadDetail(itemId, seq) {
+  let data;
+  try {
+    data = await invoke('item_detail', { itemId });
+  } catch (err) {
+    if (seq === detailSeq) {
+      els['detail-meta'].textContent = String(err);
+    }
+    return;
+  }
+  if (seq !== detailSeq) {
+    return;
+  }
+
+  els['detail-title'].textContent = data.title || '—';
+  const meta = [];
+  if (data.code) meta.push(`番号 ${data.code}`);
+  if (data.releaseDate) meta.push(`发行 ${data.releaseDate}`);
+  if (data.durationMs) meta.push(`时长 ${formatTime(data.durationMs)}`);
+  if (data.rating) meta.push(`评分 ${Number(data.rating).toFixed(1)}`);
+  els['detail-meta'].textContent = meta.join(' · ') || '暂无发行信息';
+
+  if (data.hasPoster) {
+    const img = document.createElement('img');
+    img.alt = data.title || '封面';
+    img.addEventListener('click', () => openLightbox(img.src));
+    els['detail-poster'].appendChild(img);
+    const cached = coverCache.get(itemId);
+    if (cached) {
+      img.src = cached;
+    } else {
+      invoke('item_cover', { itemId })
+        .then((src) => {
+          if (src && seq === detailSeq) {
+            coverCache.set(itemId, src);
+            img.src = src;
+          }
+        })
+        .catch(() => {});
+    }
+  } else {
+    els['detail-poster'].appendChild(el('div', 'detail-poster-empty', '暂无封面'));
+  }
+
+  const groups = [
+    ['类别', data.categories],
+    ['系列', data.series],
+    ['片商', data.maker],
+    ['导演', data.director],
+    ['演员', data.actors],
+  ];
+  for (const [label, values] of groups) {
+    if (!Array.isArray(values) || !values.length) continue;
+    const row = el('div', 'detail-tag-row');
+    row.appendChild(el('span', 'dt-label', label));
+    for (const value of values) {
+      const chip = el('span', 'chip dt-chip-link', value);
+      chip.title = `查看「${label} · ${value}」下的影片`;
+      chip.addEventListener('click', () => openTagBrowse(label, value));
+      row.appendChild(chip);
+    }
+    els['detail-tags'].appendChild(row);
+  }
+  if (!els['detail-tags'].childElementCount) {
+    els['detail-tags'].appendChild(el('div', 'detail-meta', '暂无标签：点「从数据源更新」抓取'));
+  }
+
+  if (Array.isArray(data.screenshots) && data.screenshots.length) {
+    for (const name of data.screenshots) {
+      const img = document.createElement('img');
+      img.alt = '截图';
+      img.addEventListener('click', () => openLightbox(img.src));
+      els['detail-shots'].appendChild(img);
+      invoke('item_screenshot', { itemId, fileName: name })
+        .then((src) => {
+          if (src && seq === detailSeq) {
+            img.src = src;
+          } else {
+            img.remove();
+          }
+        })
+        .catch(() => img.remove());
+    }
+  } else {
+    els['detail-shots'].appendChild(el('div', 'detail-meta', '暂无截图'));
+  }
+
+  if (Array.isArray(data.comments) && data.comments.length) {
+    for (const comment of data.comments) {
+      const box = el('div', 'detail-comment');
+      const head = el('div', 'detail-comment-head');
+      head.appendChild(el('span', 'detail-comment-author', comment.author || '匿名'));
+      if (comment.score) {
+        head.appendChild(el('span', 'detail-comment-score', `${comment.score} 星`));
+      }
+      head.appendChild(el('span', 'detail-comment-likes', `赞 ${comment.likes || 0}`));
+      if (comment.postedAt) {
+        head.appendChild(el('span', 'detail-comment-likes', comment.postedAt));
+      }
+      box.appendChild(head);
+      box.appendChild(el('div', 'detail-comment-body', comment.content));
+      els['detail-comments'].appendChild(box);
+    }
+  } else {
+    els['detail-comments'].appendChild(
+      el('div', 'detail-meta', '暂无短评：需在「元数据」里填入登录 Cookie 后才会抓取'),
+    );
+  }
+
+  els['detail-state'].textContent = scrapeStateText(data);
+  els['detail-trailer'].disabled = !data.hasTrailer;
+  els['detail-trailer'].title = data.hasTrailer ? '' : '还没有预告片，点「从数据源更新」抓取';
+}
+
+/** 当前详情条目重新从数据源抓取（手动触发，force = true）。 */
+async function scrapeCurrentItem() {
+  if (!detailItem) {
+    return;
+  }
+  const item = detailItem;
+  els['detail-refresh'].disabled = true;
+  els['detail-state'].textContent = '正在从数据源抓取…';
+  try {
+    const result = await invoke('scrape_item', { itemId: item.id, force: true });
+    coverCache.delete(item.id);
+    if (result.message) {
+      els['detail-state'].textContent = `刮削失败：${result.message}`;
+      showToast(`刮削失败：${result.message}`);
+      return;
+    }
+    showToast(
+      `已更新：截图 ${result.screenshots} 张 · 短评 ${result.comments} 条` +
+        (result.trailerSaved ? ' · 预告片已保存' : ''),
+    );
+    await loadDetail(item.id, (detailSeq += 1));
+    await refresh();
+    await reloadFilters();
+  } catch (err) {
+    els['detail-state'].textContent = String(err);
+    showToast(String(err));
+  } finally {
+    els['detail-refresh'].disabled = false;
+  }
+}
+
+/** 在详情封面位置播放预告片（原生预览窗口覆盖封面区域）。 */
+async function playDetailTrailer() {
+  if (!detailItem) {
+    return;
+  }
+  stopPreview();
+  els['trailer-stage'].classList.remove('hidden');
+  const rect = els['trailer-frame'].getBoundingClientRect();
+  const x = toPhysical(rect.left);
+  const y = toPhysical(rect.top);
+  const width = toPhysical(rect.width);
+  const height = toPhysical(rect.height);
+  try {
+    els['detail-state'].textContent = '正在准备预告片…';
+    const result = await invoke('play_trailer', { itemId: detailItem.id, x, y, width, height });
+    if (!result.started) {
+      els['trailer-stage'].classList.add('hidden');
+      els['detail-state'].textContent = result.reason || '无法播放预告片';
+      showToast(result.reason || '无法播放预告片');
+      return;
+    }
+    els['detail-state'].textContent = '预告片播放中：点击画面或关闭详情即可停止';
+    previewItemId = detailItem.id;
+    previewRect = { x, y, w: width, h: height };
+    startTrailerTick();
+    clearTimeout(previewStopTimer);
+    // 预告片通常 1~3 分钟：超时兜底，点击画面 / 关闭详情都会立即停止
+    previewStopTimer = setTimeout(stopPreview, 5 * 60 * 1000);
+  } catch (err) {
+    showToast(String(err));
+  }
+}
+
+/** 放大查看封面 / 截图：全屏遮罩层，点击任意处关闭。 */
+function openLightbox(src) {
+  if (!src) {
+    return;
+  }
+  els['lightbox-img'].src = src;
+  els['lightbox'].classList.remove('hidden');
+}
+
+function closeLightbox() {
+  els['lightbox'].classList.add('hidden');
+  els['lightbox-img'].removeAttribute('src');
+}
+
+/** 从详情进入正式播放：先收起详情，避免与续播弹层叠在一起。 */
+function playFromDetail() {
+  if (!detailItem) {
+    return;
+  }
+  const item = detailItem;
+  hideDetail();
+  openItem(item);
+}
+
+// ---------------------------------------------------------------------------
+// 库管理：左栏媒体源列表 + 右栏选中源的详情与操作（只删库内记录，不删硬盘文件）
+// ---------------------------------------------------------------------------
+
+/** 媒体源的扫描状态：文案 + 色调，列表圆点与详情徽标共用。 */
+const MANAGE_STATES = {
+  idle: { text: '正常', tone: 'ok' },
+  scanning: { text: '扫描中', tone: 'busy' },
+  scan_failed: { text: '扫描失败', tone: 'bad' },
+};
+
+let manageSources = [];        // 最近一次 list_sources 的结果
+let manageSelectedId = null;   // 右栏当前展示的源；重新渲染时优先保留
+
+function manageStateOf(source) {
+  return MANAGE_STATES[source.state] || MANAGE_STATES.idle;
+}
 
 async function openManageModal() {
   els['manage-list'].replaceChildren();
+  els['manage-detail'].replaceChildren();
   els['manage-modal'].classList.remove('hidden');
   await renderManageList();
 }
@@ -1036,6 +2052,7 @@ function hideManageModal() {
   els['manage-modal'].classList.add('hidden');
 }
 
+/** 拉取全部媒体源并重绘两栏；选中项失效（被清除）时退回第一个。 */
 async function renderManageList() {
   let list = [];
   try {
@@ -1044,33 +2061,295 @@ async function renderManageList() {
     showToast(String(err));
     return;
   }
-  els['manage-list'].replaceChildren();
-  if (!list.length) {
-    els['manage-list'].textContent = '尚未添加媒体源';
+  manageSources = Array.isArray(list) ? list : [];
+  if (!manageSources.some((source) => source.id === manageSelectedId)) {
+    manageSelectedId = manageSources.length ? manageSources[0].id : null;
+  }
+  renderManageSidebar();
+  renderManageDetail();
+}
+
+/** 顶栏汇总：源数 / 条目总数 / 合并目录数 / 失败源数。 */
+function renderManageSummary() {
+  const box = els['manage-summary'];
+  box.replaceChildren();
+  const items = manageSources.reduce((sum, source) => sum + (source.itemCount || 0), 0);
+  const merged = manageSources.reduce(
+    (sum, source) => sum + ((source.extraRoots || []).length),
+    0,
+  );
+  const failed = manageSources.filter((source) => source.state === 'scan_failed').length;
+
+  const chip = (text, tone) => el('span', 'manage-chip' + (tone ? ` ${tone}` : ''), text);
+  box.append(chip(`源 ${manageSources.length}`), chip(`条目 ${items.toLocaleString('zh-CN')}`));
+  if (merged) {
+    box.appendChild(chip(`合并目录 ${merged}`));
+  }
+  if (failed) {
+    box.appendChild(chip(`失败 ${failed}`, 'bad'));
+  }
+  els['manage-source-count'].textContent = String(manageSources.length);
+}
+
+function renderManageSidebar() {
+  renderManageSummary();
+  const list = els['manage-list'];
+  list.replaceChildren();
+  if (!manageSources.length) {
+    list.appendChild(el('div', 'manage-list-empty', '尚未添加媒体源'));
     return;
   }
-  for (const source of list) {
-    const row = document.createElement('div');
-    row.className = 'manage-row';
+  for (const source of manageSources) {
+    const selected = source.id === manageSelectedId;
+    const state = manageStateOf(source);
 
-    const info = document.createElement('div');
-    info.className = 'manage-info';
-    const name = document.createElement('div');
-    name.className = 'manage-name';
-    name.textContent = `${source.name} · ${source.itemCount} 条`;
-    const path = document.createElement('div');
-    path.className = 'manage-path';
-    path.textContent = source.location;
-    info.append(name, path);
+    const row = el('button', 'manage-item' + (selected ? ' on' : ''));
+    row.type = 'button';
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', selected ? 'true' : 'false');
+    row.title = `${source.name}（${source.location}）`;
 
-    const clear = document.createElement('button');
-    clear.className = 'btn';
-    clear.textContent = '清除';
-    clear.disabled = !source.itemCount;
-    clear.title = '删除该源在库内的全部条目与源登记，不删除硬盘文件';
-    clear.addEventListener('click', () => clearSource(source));
-    row.append(info, clear);
-    els['manage-list'].appendChild(row);
+    const top = el('span', 'mi-top');
+    const dot = el('span', `mi-dot ${state.tone}`);
+    dot.title = state.text;
+    top.append(dot, el('span', 'mi-name', source.name), el('span', 'mi-count', `${source.itemCount} 条`));
+    row.appendChild(top);
+    row.appendChild(el('span', 'mi-path', source.location));
+    if (state.tone === 'bad') {
+      const err = el('span', 'mi-err', source.lastError || '最近一次扫描失败');
+      err.title = source.lastError || '最近一次扫描失败';
+      row.appendChild(err);
+    }
+
+    row.addEventListener('click', () => {
+      if (manageSelectedId === source.id) {
+        return;
+      }
+      manageSelectedId = source.id;
+      renderManageSidebar();
+      renderManageDetail();
+    });
+    list.appendChild(row);
+  }
+}
+
+/** 右栏：选中源的路径、条目数、合并目录与操作。无源时给空状态引导。 */
+function renderManageDetail() {
+  const box = els['manage-detail'];
+  box.replaceChildren();
+
+  const source = manageSources.find((item) => item.id === manageSelectedId);
+  if (!source) {
+    const empty = el('div', 'manage-empty');
+    empty.append(
+      el('div', 'manage-empty-mark', '库'),
+      el('div', 'manage-empty-title', '还没有媒体源'),
+      el('div', 'manage-empty-sub', '回到顶栏点「添加目录」，选择本机文件夹后会自动扫描入库。'),
+    );
+    box.appendChild(empty);
+    return;
+  }
+
+  const state = manageStateOf(source);
+
+  const head = el('div', 'md-head');
+  head.appendChild(el('h3', 'md-name', source.name));
+  const pill = el('span', `md-state ${state.tone}`, state.text);
+  if (source.lastError) {
+    pill.title = source.lastError;
+  }
+  head.appendChild(pill);
+  box.appendChild(head);
+
+  const path = el('div', 'md-path');
+  path.appendChild(el('span', 'md-path-label', '目录'));
+  path.appendChild(el('span', 'md-path-text', source.location));
+  box.appendChild(path);
+
+  if (source.state === 'scan_failed') {
+    box.appendChild(
+      el('div', 'md-alert', `上次扫描失败：${source.lastError || '未知原因'}`),
+    );
+  }
+
+  const extraRoots = source.extraRoots || [];
+  const facts = el('div', 'md-facts');
+  const fact = (label, value) => {
+    const card = el('div', 'md-fact');
+    card.append(el('div', 'md-fact-label', label), el('div', 'md-fact-value', value));
+    return card;
+  };
+  facts.append(
+    fact('条目数', String(source.itemCount)),
+    fact('合并目录', String(extraRoots.length)),
+  );
+  box.appendChild(facts);
+
+  // 合并目录：只登记不移动文件，每个可单独解除
+  const rootsSec = el('section', 'md-section');
+  const rootsHead = el('div', 'md-section-head');
+  rootsHead.append(
+    el('span', 'md-section-title', '合并目录'),
+    el('span', 'md-section-note', extraRoots.length ? '只登记路径，不移动文件' : '未合并其它目录'),
+  );
+  rootsSec.appendChild(rootsHead);
+  if (extraRoots.length) {
+    const roots = el('div', 'md-roots');
+    for (const extra of extraRoots) {
+      const row = el('div', 'md-root');
+      const text = el('span', 'md-root-text', extra);
+      text.title = extra;
+      const detach = el('button', 'md-root-x', '×');
+      detach.type = 'button';
+      detach.title = '取消该目录与本源的合并，并清除其已入库条目（不删除硬盘文件）';
+      detach.addEventListener('click', () => detachRoot(source, extra));
+      row.append(text, detach);
+      roots.appendChild(row);
+    }
+    rootsSec.appendChild(roots);
+  }
+  box.appendChild(rootsSec);
+
+  // 入库：扫描主目录与合并目录、合并新目录、登记单个视频文件
+  const intakeSec = el('section', 'md-section');
+  intakeSec.appendChild(el('div', 'md-section-title', '入库'));
+  const intake = el('div', 'md-actions');
+
+  const scan = el('button', 'btn primary', '扫描新视频');
+  scan.type = 'button';
+  scan.title = '重新扫描该目录（含合并目录），把新增视频入库';
+  scan.addEventListener('click', () => rescanSource(source));
+
+  const merge = el('button', 'btn', '合并目录');
+  merge.type = 'button';
+  merge.title = '把另一个目录登记到本媒体源（只登记，不移动文件）';
+  merge.addEventListener('click', () => mergeDirectory(source));
+
+  const addVideos = el('button', 'btn', '添加视频');
+  addVideos.type = 'button';
+  addVideos.title = '选择视频文件登记到本媒体源（只登记，不移动文件）';
+  addVideos.addEventListener('click', () => addVideosToSource(source));
+
+  intake.append(scan, merge, addVideos);
+  intakeSec.appendChild(intake);
+  box.appendChild(intakeSec);
+
+  // 维护：按番号补齐全源元数据
+  const maintainSec = el('section', 'md-section');
+  const maintainHead = el('div', 'md-section-head');
+  maintainHead.append(
+    el('span', 'md-section-title', '维护'),
+    el('span', 'md-section-note', '按番号抓取标题 / 封面 / 标签 / 短评'),
+  );
+  const maintain = el('div', 'md-actions');
+  const fill = el('button', 'btn', '补齐元数据');
+  fill.type = 'button';
+  fill.disabled = !source.itemCount;
+  fill.title = '按番号从数据源抓取标题 / 封面 / 截图 / 标签 / 日期 / 演员 / 短评 / 预告片';
+  fill.addEventListener('click', () => scrapeMissing(source.id));
+  maintain.appendChild(fill);
+  maintainSec.append(maintainHead, maintain);
+  box.appendChild(maintainSec);
+
+  // 危险操作：整源清除，单独放在底部并保留一句影响说明
+  const danger = el('section', 'md-danger');
+  const dangerText = el('div', 'md-danger-text');
+  dangerText.append(
+    el('div', 'md-danger-title', '清除该媒体源'),
+    el('div', 'md-danger-sub', '删除源登记与该源的全部条目记录（含进度、标签关联与搜索索引）。'),
+  );
+  const clear = el('button', 'btn danger', '清除该源');
+  clear.type = 'button';
+  clear.disabled = !source.itemCount;
+  clear.title = '删除该源在库内的全部条目与源登记，不删除硬盘文件';
+  clear.addEventListener('click', () => clearSource(source));
+  danger.append(dangerText, clear);
+  box.appendChild(danger);
+}
+
+/** 重扫一个源：扫描完成后刷新库与当前管理清单。 */
+async function rescanSource(source) {
+  await scanSource(source);
+  await refreshSources();
+  await renderManageList();
+}
+
+/** 把一个目录合并进指定媒体源（只登记，不移动文件），随后立即扫描。 */
+async function mergeDirectory(source) {
+  const path = await pickFolder(`选择要合并进「${source.name}」的目录`);
+  if (!path) {
+    return;
+  }
+  try {
+    await invoke('add_source_root', { id: source.id, path });
+    await renderManageList();
+    await scanSource(source);
+    await refreshSources();
+    await renderManageList();
+  } catch (err) {
+    showToast(String(err));
+  }
+}
+
+/** 解除一个合并目录：取消登记并清掉该目录下已入库的记录，硬盘文件保留。 */
+async function detachRoot(source, path) {
+  const ok = await confirmDialog(
+    '解除合并目录？',
+    `将从「${source.name}」中取消登记 ${path}，并清除该目录下已入库的条目。\n` +
+      '硬盘上的视频文件不会被删除。确定继续吗？',
+  );
+  if (!ok) {
+    return;
+  }
+  try {
+    const removed = await invoke('remove_source_root', { id: source.id, path });
+    await renderManageList();
+    await refreshSources();
+    await refresh();
+    await reloadFilters();
+    showToast(`已解除合并，清除 ${removed} 条记录`);
+  } catch (err) {
+    showToast(String(err));
+  }
+}
+
+/** 把用户选中的视频文件登记到指定媒体源（只登记，不移动文件）。 */
+async function addVideosToSource(source) {
+  const dialog = TAURI && TAURI.dialog;
+  if (!dialog || typeof dialog.open !== 'function') {
+    showToast('当前环境不支持文件选择');
+    return;
+  }
+  let picked = null;
+  try {
+    picked = await dialog.open({
+      directory: false,
+      multiple: true,
+      title: `选择要添加到「${source.name}」的视频`,
+      filters: [
+        {
+          name: '视频',
+          extensions: ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'ts', 'm2ts', 'webm', 'rmvb', 'mpg', 'mpeg', 'm4v'],
+        },
+      ],
+    });
+  } catch (err) {
+    showToast(String(err));
+    return;
+  }
+  const paths = Array.isArray(picked) ? picked : typeof picked === 'string' ? [picked] : [];
+  if (!paths.length) {
+    return;
+  }
+  try {
+    const report = await invoke('add_videos_to_source', { id: source.id, paths });
+    await renderManageList();
+    await refreshSources();
+    await refresh();
+    await reloadFilters();
+    showToast(`已添加 ${report.stored} 条视频`);
+  } catch (err) {
+    showToast(String(err));
   }
 }
 
@@ -1237,7 +2516,10 @@ async function refreshSources() {
     if (failed) {
       suffix = source.lastError ? ` · 扫描失败（${source.lastError}）` : ' · 扫描失败';
     }
-    node.textContent = `${source.name}（${source.location}）${suffix}`;
+    const merged = source.extraRoots && source.extraRoots.length
+      ? ` · 合并 ${source.extraRoots.length} 个目录`
+      : '';
+    node.textContent = `${source.name}（${source.location}）${merged}${suffix}`;
     els.sources.appendChild(node);
   }
 }
@@ -1370,6 +2652,7 @@ function subItemId(target) {
 /** 打开播放页 / 某格字幕菜单后：拉入口可见性 + 轨道 + 状态，并选定复用轨道。 */
 async function initSubtitleForItem(itemId, target = subTarget) {
   resetSubtitleLocal(target);
+  resetOnlinePanel();
   const ctx = subCtx(target);
   try { ctx.info = await invoke('subtitle_info', { slot: target }); } catch (err) { ctx.info = null; }
   try { ctx.tracks = (await invoke('subtitle_tracks', { itemId })) || []; } catch (err) { ctx.tracks = []; }
@@ -1655,51 +2938,28 @@ function hideSubtitleOverlay() {
 
 function refreshSubtitleUi(target = subTarget) {
   const ctx = subCtx(target);
-  // 「实时字幕」入口：仅当该条目可见入口且尚未开启时出现在控制栏（单路播放）
+  // 「在线字幕」入口：仅当该条目尚无可用字幕轨道时出现在控制栏（单路播放）
   els['pb-sublive'].classList.toggle('hidden', !(playingId && ctx.entryVisible) || liveOn(target));
 
-  const state = ctx.info ? ctx.info.state : 'idle';
-  if (ctx.info && (ctx.info.enabled || state !== 'idle')) {
-    const count = typeof ctx.info.cueCount === 'number' ? ctx.info.cueCount : 0;
-    els['sm-state'].textContent = `${SUB_STATE_TEXT[state] || '—'} · 已采集 ${count} 句`;
-  } else {
-    els['sm-state'].textContent = '未开启';
-  }
+  const track = ctx.tracks.find((t) => t.id === ctx.reuseTrackId) || null;
+  els['sm-state'].textContent = track
+    ? `${SUB_KIND_TEXT[track.kind] || '字幕'} · ${typeof track.cueCount === 'number' ? track.cueCount : 0} 句`
+    : '未挂载字幕';
 
   renderSubtitleNotice(target);
   renderSubtitleTracks(target);
-
-  const on = liveOn(target);
-  els['sm-start'].classList.toggle('hidden', on);
-  els['sm-save'].classList.toggle('hidden', !on);
-  els['sm-stop'].classList.toggle('hidden', !on && !(ctx.info && ctx.info.enabled));
-
-  // 叠层以 display 为准，这里同步菜单里的呈现选择
-  if (on && ctx.info && ctx.info.display) setDisplaySeg(ctx.info.display);
+  // 菜单高度变化会改变底部让位高度（原生画面不得压住面板）
+  syncPlayerPanels();
 }
 
 function renderSubtitleNotice(target = subTarget) {
   const ctx = subCtx(target);
-  const queue = queueText(target);
-  els['sm-queue'].textContent = queue;
-  els['sm-queue'].classList.toggle('hidden', !queue);
-
   const notes = [];
   if (ctx.info && ctx.info.failure) notes.push(`失败原因：${ctx.info.failure}`);
   if (ctx.degradedNotice) notes.push(ctx.degradedNotice);
   els['sm-notice'].replaceChildren();
   els['sm-notice'].classList.toggle('hidden', notes.length === 0);
   for (const note of notes) els['sm-notice'].appendChild(el('div', 'sm-note', note));
-}
-
-/** 「识别队列」占用：由 quality 与 pausedForResources 推导（后端不单列该字段）。 */
-function queueText(target = subTarget) {
-  const ctx = subCtx(target);
-  if (!ctx.info || !ctx.info.enabled) return '';
-  if (ctx.info.pausedForResources) return '识别队列：保护性暂停';
-  if (ctx.info.quality === 'critical') return '识别队列：占用过高';
-  if (ctx.info.quality === 'degraded') return '识别队列：占用偏高';
-  return '识别队列：正常';
 }
 
 function renderSubtitleTracks(target = subTarget) {
@@ -1721,13 +2981,214 @@ function renderSubtitleTracks(target = subTarget) {
   }
 }
 
+// ---- 在线字幕（迅雷影音字幕库：搜索 → 列表 → 点选挂载） ----
+
+/** 搜索序号：用户连续搜索时只采纳最后一次结果。 */
+let onlineSearchSeq = 0;
+
+function resetOnlinePanel() {
+  els['sm-online-query'].value = '';
+  els['sm-online-list'].replaceChildren();
+  els['sm-online-list'].classList.add('hidden');
+  renderOnlineStatus('');
+}
+
+function renderOnlineStatus(text) {
+  els['sm-online-status'].textContent = text || '';
+  els['sm-online-status'].classList.toggle('hidden', !text);
+}
+
+function renderOnlineList(results) {
+  els['sm-online-list'].replaceChildren();
+  if (!results.length) {
+    els['sm-online-list'].classList.add('hidden');
+    return;
+  }
+  els['sm-online-list'].classList.remove('hidden');
+  for (const sub of results) {
+    const row = el('button', 'sm-online-item');
+    row.type = 'button';
+    row.title = `${sub.name}（${sub.source || '迅雷字幕库'}）`;
+    row.appendChild(el('span', 'so-name', sub.name || '字幕'));
+    row.appendChild(el('span', 'so-tag', sub.lang || '未标注'));
+    row.appendChild(el('span', 'so-meta', `${(sub.ext || '').toUpperCase()} · ${sub.source || ''}`));
+    row.addEventListener('click', () => loadOnlineSubtitle(sub, row));
+    els['sm-online-list'].appendChild(row);
+  }
+}
+
+/** 搜索在线字幕：输入为空时由后端按番号 / 标题 / 文件名自动识别。 */
+async function searchOnlineSubtitles() {
+  const itemId = subItemId(subTarget);
+  if (!itemId) {
+    showToast('当前没有正在播放的条目');
+    return;
+  }
+  const query = els['sm-online-query'].value.trim();
+  const seq = ++onlineSearchSeq;
+  els['sm-online-list'].replaceChildren();
+  els['sm-online-list'].classList.add('hidden');
+  renderOnlineStatus('正在搜索字幕…');
+  let results;
+  try {
+    results = await invoke('subtitle_online_search', { itemId, query: query || null });
+  } catch (err) {
+    if (seq === onlineSearchSeq) renderOnlineStatus(`搜索失败：${err}`);
+    return;
+  }
+  if (seq !== onlineSearchSeq) return;
+  renderOnlineStatus(results.length
+    ? `找到 ${results.length} 条字幕，点选即挂载`
+    : '未找到匹配字幕，可换个番号或片名再试');
+  renderOnlineList(results);
+  syncPlayerPanels();
+}
+
+/** 点选一条在线字幕：下载 → 解析 → 保存为外挂轨道 → 立即切换渲染。 */
+async function loadOnlineSubtitle(sub, row) {
+  const itemId = subItemId(subTarget);
+  if (!itemId) {
+    showToast('当前没有正在播放的条目');
+    return;
+  }
+  row.disabled = true;
+  renderOnlineStatus(`正在下载 ${sub.name}…`);
+  try {
+    await invoke('subtitle_online_load', {
+      itemId,
+      url: sub.url,
+      lang: sub.lang && sub.lang !== '未标注' ? sub.lang : null,
+      slot: subTarget,
+    });
+  } catch (err) {
+    row.disabled = false;
+    renderOnlineStatus(`加载失败：${err}`);
+    showToast(String(err));
+    return;
+  }
+  await refreshSubtitleTracks(subTarget); // 挂载后切到外挂轨道渲染
+  closeSubtitleMenu(); // 收起菜单，让字幕立刻完整显示在画面上
+  showToast(`已加载在线字幕：${sub.name}`);
+}
+
+/**
+ * 单路播放时字幕面板需要的底部让位高度（CSS 像素）。
+ *
+ * 原生画面窗口恒压在 WebView 之上：字幕菜单 / 弹层若落在画面区域内就会被盖住，
+ * 点击还会落到画面上触发暂停，表现为「控件区域卡死」。打开面板时让画面向上收，
+ * 由后端把画面宿主缩到控制条 + 让位高度之上。
+ */
+function panelReserveCss() {
+  if (!playingId || inMulti) return 0;
+  let need = 0;
+  if (!els['subtitle-menu'].classList.contains('hidden')) {
+    need = Math.max(need, els['subtitle-menu'].getBoundingClientRect().height + 20);
+  }
+  for (const id of ['subtitle-privacy', 'subtitle-failure', 'subtitle-external']) {
+    if (els[id].classList.contains('hidden')) continue;
+    const card = els[id].querySelector('.modal-card');
+    need = Math.max(need, (card ? card.getBoundingClientRect().height : 320) + 32);
+  }
+  // 实时字幕显示期间常驻让出一条：叠层贴在控制条上沿，否则两行字幕同样被画面盖住
+  if (liveOn(null)) need = Math.max(need, 96);
+  // 播放器设置面板：同样落在画面区域内，需让位
+  if (!els['player-settings'].classList.contains('hidden')) {
+    need = Math.max(need, els['player-settings'].getBoundingClientRect().height + 20);
+  }
+  return Math.ceil(need);
+}
+
+// ---- 字幕定位：画面内底部（扣掉控制条、面板让位与上下黑边） ----
+
+/** 当前画面的显示宽高比（宽/高）；未知时字幕退回窗口底部。 */
+let playerAspect = null;
+let aspectTimer = 0;
+
+function resetVideoAspect() {
+  playerAspect = null;
+  if (aspectTimer) {
+    clearTimeout(aspectTimer);
+    aspectTimer = 0;
+  }
+  updateSubtitleStage();
+}
+
+/**
+ * 轮询读取画面比例：mpv 在解出首帧前读不到 `width/height`，
+ * 因此启动后短轮询，成功即停。
+ */
+function watchVideoAspect() {
+  if (aspectTimer) {
+    clearTimeout(aspectTimer);
+    aspectTimer = 0;
+  }
+  playerAspect = null;
+  let tries = 0;
+  const probe = async () => {
+    if (!playingId || inMulti) return;
+    try {
+      const aspect = await invoke('player_video_aspect', { slot: null });
+      if (aspect && aspect > 0.05) {
+        playerAspect = aspect;
+        updateSubtitleStage();
+        return;
+      }
+    } catch (err) {
+      /* 属性暂不可读：继续重试，失败不影响播放 */
+    }
+    tries += 1;
+    if (tries < 15 && playingId) aspectTimer = setTimeout(probe, 400);
+  };
+  probe();
+}
+
+/** 把字幕叠层底边放到画面内底部。 */
+function updateSubtitleStage() {
+  const bar = els['player-bar'];
+  const barVisible = bar && !bar.classList.contains('hidden');
+  const barH = barVisible && !playerBarHidden ? bar.getBoundingClientRect().height : 0;
+  const reserve = playingId && !inMulti ? playerReserveCss : 0;
+  const availH = Math.max(0, window.innerHeight - barH - reserve);
+  let bottom = barH + reserve;
+  if (playerAspect && availH > 0) {
+    // mpv 按比例居中：上下黑边各占剩余高度的一半
+    const contentH = Math.min(availH, window.innerWidth / playerAspect);
+    bottom += Math.max(0, (availH - contentH) / 2);
+  }
+  document.documentElement.style.setProperty('--sub-bottom', `${Math.round(bottom)}px`);
+}
+
+/** 面板开合 / 控制条显隐后同步底部留出量；无变化时不重复下发命令。 */
+async function syncPlayerPanels() {
+  const need = playingId && !inMulti ? panelReserveCss() : 0;
+  playerReserveCss = need;
+  updateSubtitleStage();
+  // 控制条隐藏且没有面板让位时，画面铺满窗口（负值收掉控制条区域）
+  let phys = toPhysical(need);
+  if (playerBarHidden && need === 0 && playingId && !inMulti) {
+    phys = -constants.controlBarPx;
+  }
+  if (phys === playerSentReserve) {
+    return;
+  }
+  playerSentReserve = phys;
+  try {
+    await invoke('set_player_reserve', { extra: phys });
+  } catch (err) {
+    /* 让位失败不影响面板逻辑，最坏情况仍是画面压住面板 */
+  }
+}
+
 function openSubtitleMenu() {
+  revealPlayerBar();
   els['subtitle-menu'].classList.remove('hidden');
   refreshSubtitleUi(subTarget);
+  syncPlayerPanels();
 }
 
 function closeSubtitleMenu() {
   els['subtitle-menu'].classList.add('hidden');
+  syncPlayerPanels();
 }
 
 function hideSubtitleUi() {
@@ -1780,6 +3241,7 @@ function openSubtitlePrivacy() {
   }
   updatePrivacyNote();
   els['subtitle-privacy'].classList.remove('hidden');
+  syncPlayerPanels();
 }
 
 /** 明确告知音频是否会离开本机；未授权远端时说明本次仅本地模式。 */
@@ -1796,6 +3258,7 @@ function updatePrivacyNote() {
 
 function hideSubtitlePrivacy() {
   els['subtitle-privacy'].classList.add('hidden');
+  syncPlayerPanels();
 }
 
 async function confirmSubtitlePrivacy() {
@@ -1915,10 +3378,12 @@ function openSubtitleFailure(reason) {
   els['sub-failure-desc'].textContent = reason ? `原因：${reason}` : '实时字幕生成失败。';
   els['subtitle-failure'].classList.remove('hidden');
   clearSubtitleLines(subTarget);
+  syncPlayerPanels();
 }
 
 function hideSubtitleFailure() {
   els['subtitle-failure'].classList.add('hidden');
+  syncPlayerPanels();
 }
 
 /** 出口二：仅做原文听写（保留已选语种/引擎，display 固定 originOnly）。 */
@@ -1946,10 +3411,12 @@ function openExternalModal() {
   els['sub-external-path'].value = '';
   els['subtitle-external'].classList.remove('hidden');
   els['sub-external-path'].focus();
+  syncPlayerPanels();
 }
 
 function hideExternalModal() {
   els['subtitle-external'].classList.add('hidden');
+  syncPlayerPanels();
 }
 
 async function confirmExternal() {
@@ -1979,34 +3446,13 @@ function bindSubtitleEvents() {
   els['pb-sublive'].addEventListener('click', () => {
     subTarget = null;
     openSubtitleMenu();
-    requestStartLive();
+    searchOnlineSubtitles();
   });
   els['sm-close'].addEventListener('click', closeSubtitleMenu);
 
-  els['sm-start'].addEventListener('click', requestStartLive);
-  els['sm-save'].addEventListener('click', saveSubtitleTrack);
-  els['sm-stop'].addEventListener('click', stopLive);
-
-  els['sm-origin-lang'].addEventListener('change', () => {
-    if (liveOn(subTarget)) showToast('原声语种将在下次生成时生效');
-  });
-  els['sm-target-lang'].addEventListener('change', () => {
-    // 「不翻译」（原声同语种）只显示原文，等价于 display=originOnly
-    const noTranslate = els['sm-target-lang'].value === '';
-    setDisplaySeg(noTranslate ? 'originOnly' : 'bilingual');
-    applyDisplay(currentDisplay());
-  });
-  els['sm-display-group'].addEventListener('click', (event) => {
-    const btn = event.target.closest('.seg-btn');
-    if (!btn) return;
-    if (els['sm-target-lang'].value === '' && btn.dataset.display !== 'originOnly') {
-      showToast('目标语言为「不翻译」，仅显示原文');
-      setDisplaySeg('originOnly');
-      applyDisplay('originOnly');
-      return;
-    }
-    setDisplaySeg(btn.dataset.display);
-    applyDisplay(btn.dataset.display);
+  els['sm-online-search'].addEventListener('click', searchOnlineSubtitles);
+  els['sm-online-query'].addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') searchOnlineSubtitles();
   });
 
   els['sub-privacy-confirm'].addEventListener('click', confirmSubtitlePrivacy);
@@ -2033,8 +3479,8 @@ function bindSubtitleEvents() {
 // 退出策略全部在后端收口。原生画面窗口覆盖每格的 .screen-area，因此格内所有可点
 // 控件都留在画面区之外的顶部条与控制条里。
 
-/** 最多同时选择的路数（与 P0 布局的最大格位数一致：2 × 2 = 4）。 */
-const MULTI_MAX_SELECT = 4;
+/** 最多同时选择的路数（3 × 3 = 9）。 */
+const MULTI_MAX_SELECT = 9;
 
 /** 按后端返回的布局渲染舞台与布局条。 */
 async function loadLayouts() {
@@ -2123,7 +3569,7 @@ async function removeSelected() {
 
 function renderSelectBar() {
   els['select-count'].textContent = `已选 ${selectedIds.length} 部`;
-  // 进入多屏仍受解码额度限制（MULTI_MAX_SELECT 路），超限时按钮直接不可用，
+  // 进入多屏受格位与解码额度限制（最多 9 路），超限时按钮直接不可用，
   // 而不是勾到第 5 部才弹提示——多选本身要为批量清除放开数量。
   els['select-enter'].disabled = selectedIds.length < 2 || selectedIds.length > MULTI_MAX_SELECT;
   els['select-remove'].disabled = selectedIds.length === 0;
@@ -2333,9 +3779,9 @@ function renderMultiBar() {
   els['browse-btn'].classList.toggle('primary', browsingLibrary);
 }
 
-/** 上限选项：至少到 4 路（P0 最大格位），已持久化更大的值也照实呈现。 */
+/** 上限选项：至少到 9 路（3 × 3 九宫格），已持久化更大的值也照实呈现。 */
 function renderLimitOptions(limit) {
-  const max = Math.max(4, limit);
+  const max = Math.max(9, limit);
   const sel = els['limit-select'];
   if (sel.dataset.max !== String(max)) {
     sel.replaceChildren();
@@ -2567,7 +4013,17 @@ async function enterMulti() {
   }
   multiBusy = true;
   try {
-    const tag = selectedIds.length > 2 ? '2x2' : '1x2';
+    const tag = selectedIds.length > 4 ? '3x3' : (selectedIds.length > 2 ? '2x2' : '1x2');
+    // 勾选的路数超过当前上限时自动抬高额度（最高 9 路），避免后几路被拒
+    let currentLimit = 4;
+    try {
+      currentLimit = (await invoke('multi_status')).limit || 4;
+    } catch (err) {
+      currentLimit = 4;
+    }
+    if (selectedIds.length > currentLimit) {
+      await invoke('multi_set_limit', { limit: selectedIds.length });
+    }
     let view;
     try {
       view = await invoke('multi_set_layout', { layout: tag });
@@ -2596,6 +4052,7 @@ async function enterMulti() {
     multiState = view;
     els['multi-bar'].classList.remove('hidden');
     els['player-bar'].classList.add('hidden');
+    resetVideoAspect();
     applyView();
     renderStage(view.layout);
     renderMultiBar();
@@ -2992,9 +4449,9 @@ const CONSOLE_STATUS_DIM = 'watch';
 
 /** 主机模式的卡片尺寸档位（CSS 像素）：封面卡宽 / 宽幅卡宽 / 网格最小列宽。 */
 const CONSOLE_CARD_PX = {
-  large: { cover: 168, wide: 320, grid: 224 },
-  mid: { cover: 148, wide: 284, grid: 196 },
-  small: { cover: 116, wide: 240, grid: 168 },
+  large: { cover: 620, wide: 700, grid: 540 },
+  mid: { cover: 540, wide: 620, grid: 480 },
+  small: { cover: 440, wide: 560, grid: 420 },
 };
 
 const CONSOLE_COVER_MAX = 12; // 封面卡行最多展示条数
@@ -3008,11 +4465,90 @@ let consoleRows = [];              // 每次渲染重建：[{ kind, nodes: [HTML
 let consoleFocus = { row: 0, col: 0, desiredCol: 0 };
 let consoleDimsOpenBackup = false; // 进入主机模式前的维度面板开关，退出时还原
 let consoleClockTimer = null;      // 顶栏时钟
+let consoleAmbientLayer = 0;       // 环境底当前使用的图层（0 / 1 交替做交叉淡化）
+let consoleAmbientId = null;       // 环境底正在展示的条目 id（同一影片不重复重绘）
+let consoleAmbientTimer = null;    // 旧图层淡出计时
+let consoleIdleTimer = null;       // 闲置隐藏顶栏 / 提示条
+let consoleWindowMode = false;     // 窗口是否已切到无边框全屏（避免重复调用后端）
 let libraryStats = null;           // library_stats 缓存（经典与主机顶栏共用）
+/** 推荐看点：后端按高赞短评总结核心看点，随机返回 10 条；「换一批」重新拉取。 */
+let consoleRecs = [];
+let consoleRecLlm = false;
+let consoleRecMessage = '';
+let consoleRecLoading = false;
+/** 首批推荐是否已拉取过：进入主机模式时不再重复请求，避免刚配好又换一批。 */
+let consoleRecLoaded = false;
+/** 请求完成后短暂显示「已经完成请求」的时间戳与计时器。 */
+let consoleRecDoneUntil = 0;
+let consoleRecDoneTimer = null;
 
 /** 主机层是否应当可见：播放中与多屏中一律隐藏，让位后端原生画面窗口。 */
 function consoleShown() {
   return consoleOn && !inMulti && !playingId;
+}
+
+/**
+ * 主机模式窗口形态：进入时切成无边框全屏，退出时还原进入前的窗口位置、尺寸与边框。
+ * 状态由后端保存（只保存一份），重复进入不会覆盖最初的位置。
+ */
+function setConsoleWindowMode(enabled) {
+  if (!invoke || consoleWindowMode === enabled) {
+    return;
+  }
+  consoleWindowMode = enabled;
+  invoke('set_console_fullscreen', { enabled }).catch((err) => {
+    consoleWindowMode = !enabled;
+    if (enabled) {
+      showToast(`无法切换全屏：${err}`);
+    }
+  });
+}
+
+/** 空闲 4 秒后隐去顶栏与提示条（画面更沉浸）；任何键盘 / 鼠标输入都会唤醒。 */
+function wakeConsole() {
+  els['console'].classList.remove('idle');
+  clearTimeout(consoleIdleTimer);
+  consoleIdleTimer = setTimeout(() => {
+    if (!consoleShown()) {
+      return;
+    }
+    if (!els['c-settings-panel'].classList.contains('hidden')) {
+      return;
+    }
+    els['console'].classList.add('idle');
+  }, 4000);
+}
+
+/** 焦点条目：优先全库数据（首页 Hero 可能不在当前筛选结果里）。 */
+function consoleItemById(id) {
+  if (!id) {
+    return null;
+  }
+  return consoleData.find((i) => i.id === id) || items.find((i) => i.id === id) || null;
+}
+
+/**
+ * 环境底：把焦点影片的封面大幅虚化后铺满整屏，两层交替交叉淡化。
+ * 没有封面时用与占位海报一致的色相渐变兜底，保证任何条目都有背景。
+ */
+function paintConsoleAmbient(item, force) {
+  if (!item || (!force && consoleAmbientId === item.id)) {
+    return;
+  }
+  consoleAmbientId = item.id;
+  const layer = consoleAmbientLayer === 0 ? els['c-amb-a'] : els['c-amb-b'];
+  const other = consoleAmbientLayer === 0 ? els['c-amb-b'] : els['c-amb-a'];
+  const cover = coverCache.get(item.id);
+  const hue = hueOf(item.id);
+  layer.style.backgroundImage = cover
+    ? `linear-gradient(160deg, hsla(${hue}, 55%, 42%, 0.5), hsla(${(hue + 42) % 360}, 52%, 14%, 0.72)), url("${cover}")`
+    : `linear-gradient(160deg, hsl(${hue}, 44%, 34%), hsl(${(hue + 42) % 360}, 38%, 11%))`;
+  layer.classList.add('on');
+  clearTimeout(consoleAmbientTimer);
+  consoleAmbientTimer = setTimeout(() => {
+    other.classList.remove('on');
+  }, 820);
+  consoleAmbientLayer = 1 - consoleAmbientLayer;
 }
 
 async function enterConsole() {
@@ -3021,6 +4557,10 @@ async function enterConsole() {
   }
   if (inMulti) {
     showToast('多屏播放中不能进入主机模式，请先退出多屏');
+    return;
+  }
+  if (playingId) {
+    showToast('播放中不能进入主机模式，请先关闭播放页');
     return;
   }
   consoleOn = true;
@@ -3033,12 +4573,20 @@ async function enterConsole() {
   dimsOpen = false;
   consoleMissingOnly = false;
   consoleScreen = 'home';
+  consoleAmbientId = null;
   els['c-settings-panel'].classList.add('hidden');
   els['c-preview-toggle'].checked = els['preview-toggle'].checked;
   applyView();
+  setConsoleWindowMode(true);
+  wakeConsole();
   startConsoleClock();
   await loadConsoleData();
   renderConsole();
+  // 推荐看点需要请求大模型：先渲染界面，结果回来后再填这一行；
+  // 已拉取过（例如刚在「元数据」里配好大模型）就直接复用，不重复请求。
+  if (!consoleRecLoaded) {
+    loadConsoleRecommendations();
+  }
 }
 
 function exitConsole() {
@@ -3048,11 +4596,19 @@ function exitConsole() {
   consoleOn = false;
   try { localStorage.setItem('cinema.console', '0'); } catch (err) { /* 忽略 */ }
   stopConsoleClock();
+  clearTimeout(consoleIdleTimer);
+  consoleIdleTimer = null;
+  els['console'].classList.remove('idle');
+  // 播放中退出时先不还原窗口：等播放页关闭后再还原，避免原生画面窗口尺寸错位。
+  if (!playingId) {
+    setConsoleWindowMode(false);
+  }
   dimsOpen = consoleDimsOpenBackup;
   consoleMissingOnly = false;
   els['c-settings-panel'].classList.add('hidden');
   els['c-search'].blur();
   clearConsoleFocus();
+  stopPreview();
   applyView();
   refresh(); // 回到经典界面后同步一次库状态
 }
@@ -3115,6 +4671,180 @@ function renderConsoleTopStats() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 推荐看点（P-07）：高赞短评 → 大模型总结 → 主机首页横排
+// ---------------------------------------------------------------------------
+
+/** 拉取一批看点：每次随机 10 条；已生成过的走缓存，未生成过的才请求大模型。 */
+async function loadConsoleRecommendations() {
+  if (consoleRecLoading) {
+    return;
+  }
+  consoleRecLoading = true;
+  consoleRecDoneUntil = 0;
+  clearTimeout(consoleRecDoneTimer);
+  updateConsoleRecBand(paintConsoleRecRow());
+  let requested = false;
+  try {
+    const view = await invoke('recommend_highlights', { limit: 10 });
+    consoleRecs = Array.isArray(view.items) ? view.items : [];
+    consoleRecLlm = !!view.llm;
+    consoleRecMessage = view.message || '';
+    requested = !!view.requested;
+    consoleRecLoaded = true;
+  } catch (err) {
+    consoleRecs = [];
+    consoleRecMessage = String(err);
+  } finally {
+    consoleRecLoading = false;
+  }
+  // 真正发过请求时，先显示「已经完成请求」，两秒后回到常规来源标注
+  if (requested) {
+    consoleRecDoneUntil = Date.now() + 2200;
+    clearTimeout(consoleRecDoneTimer);
+    consoleRecDoneTimer = setTimeout(() => {
+      consoleRecDoneUntil = 0;
+      updateConsoleRecBand(paintConsoleRecRow());
+      if (consoleOn && consoleScreen === 'home') {
+        applyConsoleFocus();
+      }
+    }, 2200);
+  }
+  updateConsoleRecBand(paintConsoleRecRow());
+  if (consoleOn && consoleScreen === 'home') {
+    applyConsoleFocus();
+  }
+}
+
+/** 只重绘推荐行，不重建整屏：避免刷新时焦点与滚动位置被打乱。 */
+function paintConsoleRecRow() {
+  const row = els['c-rec-row'];
+  if (!row) {
+    return [];
+  }
+  row.replaceChildren();
+  let status = '';
+  if (consoleRecLoading) {
+    status = '正在请求 API，请稍等';
+  } else if (Date.now() < consoleRecDoneUntil) {
+    status = '已经完成请求';
+  } else if (!consoleRecLlm) {
+    status = '尚未配置大模型 API · 当前为本地提炼';
+  } else if (consoleRecs.length) {
+    status = `AI 综合短评与网络资料 · 随机 ${consoleRecs.length} 条`;
+  } else {
+    status = consoleRecMessage || '暂无可推荐的看点';
+  }
+  els['c-rec-status'].textContent = status;
+  els['c-rec-refresh'].disabled = consoleRecLoading;
+
+  const nodes = [];
+  // 未配置大模型时常驻一个入口：点一下直接跳到「元数据 → 推荐看点 · 大模型」
+  if (!consoleRecLlm && !consoleRecLoading) {
+    const setup = el('button', 'c-rec-setup');
+    setup.type = 'button';
+    setup.appendChild(el('div', 'c-rec-setup-title', '配置大模型 API'));
+    setup.appendChild(
+      el('div', 'c-rec-setup-sub', '让看点真正来自 10 条评论与联网资料，而不只是本地提炼。'),
+    );
+    setup.addEventListener('click', openLlmSettings);
+    row.appendChild(setup);
+    nodes.push(setup);
+  }
+  for (const rec of consoleRecs) {
+    const card = buildRecCard(rec);
+    row.appendChild(card);
+    nodes.push(card);
+  }
+  // 「换一批」放在行尾：键盘一路右移即可到达，Enter 与点击同一条路径
+  nodes.push(els['c-rec-refresh']);
+  return nodes;
+}
+
+function updateConsoleRecBand(nodes) {
+  const idx = consoleRows.findIndex((band) => band.kind === 'rec');
+  if (idx < 0) {
+    return;
+  }
+  consoleRows[idx] = { kind: 'rec', nodes };
+  if (consoleFocus.row === idx) {
+    consoleFocus.col = Math.max(0, Math.min(consoleFocus.col, nodes.length - 1));
+  }
+}
+
+/** 看点卡：正文是总结出的一句核心看点，页脚是影片封面与片名 / 番号 / 赞数。 */
+function buildRecCard(rec) {
+  const item = consoleItemById(rec.itemId) || { id: rec.itemId, title: rec.title };
+  const card = el('div', 'c-rec-card');
+  card.dataset.id = rec.itemId;
+  card.title = `${rec.title}（单击查看详情）`;
+
+  card.appendChild(el('div', 'c-rec-quote', '“'));
+  card.appendChild(el('div', 'c-rec-text', rec.highlight || '暂无看点'));
+
+  const foot = el('div', 'c-rec-foot');
+  const cover = el('div', 'c-rec-cover');
+  const hue = hueOf(rec.itemId);
+  cover.style.background =
+    `linear-gradient(158deg, hsl(${hue}, 40%, 27%), hsl(${(hue + 42) % 360}, 34%, 14%))`;
+  if (rec.hasPoster) {
+    const img = document.createElement('img');
+    img.className = 'c-rec-img';
+    img.alt = rec.title || '封面';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    cover.appendChild(img);
+    loadCover(rec.itemId, img);
+  } else {
+    cover.textContent = (rec.title || '影').trim().charAt(0).toUpperCase();
+  }
+  foot.appendChild(cover);
+
+  const info = el('div', 'c-rec-info');
+  info.appendChild(el('div', 'c-rec-name', rec.title || '—'));
+  const sub = [];
+  if (rec.code) {
+    sub.push(rec.code);
+  }
+  if (rec.rating != null) {
+    sub.push(`★ ${Number(rec.rating).toFixed(1)}`);
+  }
+  if (rec.likes) {
+    sub.push(`${rec.likes} 赞`);
+  }
+  info.appendChild(el('div', 'c-rec-sub', sub.length ? sub.join(' · ') : '暂无番号'));
+  // 来源标注：让「用了多少条评论 / 多少项资料」可见，不再像凭空扩写标题
+  info.appendChild(
+    el(
+      'div',
+      'c-rec-src',
+      `综合 ${rec.comments || 0} 条评论 · ${rec.sources || 0} 项影片资料`,
+    ),
+  );
+  foot.appendChild(info);
+  card.appendChild(foot);
+
+  card.addEventListener('mouseenter', () => {
+    if (!selectMode && item) {
+      scheduleHover(item, card);
+    }
+  });
+  card.addEventListener('mouseleave', () => {
+    cancelHover();
+    if (consoleOn) {
+      cancelConsolePreview();
+    }
+  });
+  card.addEventListener('click', () => {
+    if (item) {
+      onCardClick(item);
+    } else {
+      openDetail({ id: rec.itemId, title: rec.title || '' });
+    }
+  });
+  return card;
+}
+
 /** Hero 元信息：用既有字段表达（本项目没有封面图与相对时间字段）。 */
 function consoleItemMeta(item) {
   if (item.missing) {
@@ -3135,32 +4865,6 @@ function consoleItemMeta(item) {
     }
   }
   return parts.length ? parts.join(' · ') : '尚未观看';
-}
-
-/** Hero：宽幅底图 + 左下大标题 + 元信息行。底图与占位海报同一套色相公式，保持视觉一致。 */
-function buildHero(item) {
-  const hero = el('div', 'c-hero');
-  hero.dataset.id = item.id;
-  hero.title = item.title;
-
-  const hue = hueOf(item.id);
-  hero.style.background =
-    `linear-gradient(158deg, hsl(${hue}, 40%, 27%), hsl(${(hue + 42) % 360}, 34%, 14%))`;
-  hero.appendChild(el('div', 'ch-initial', (item.title || '影').trim().charAt(0).toUpperCase()));
-  hero.appendChild(el('div', 'ch-grad'));
-  hero.appendChild(el('div', 'ch-kicker', '最近观看'));
-
-  const info = el('div', 'ch-info');
-  const title = el('div', 'ch-title', item.title);
-  if (item.missing) {
-    title.appendChild(el('span', 'ch-flag missing', '文件缺失'));
-  }
-  info.appendChild(title);
-  info.appendChild(el('div', 'ch-meta', consoleItemMeta(item)));
-  hero.appendChild(info);
-
-  hero.addEventListener('click', () => onCardClick(item));
-  return hero;
 }
 
 /** 宽幅卡：复用 buildCard 的卡片结构（占位海报 / 标题 / 进度 / 角标），元信息放在卡片下方。 */
@@ -3269,34 +4973,16 @@ function renderConsole() {
 
 function renderConsoleHome() {
   consoleRows = [];
-  els['c-hero'].replaceChildren();
+  els['c-rec-row'].replaceChildren();
   els['c-cover-row'].replaceChildren();
   els['c-chips'].replaceChildren();
   els['c-wide-row'].replaceChildren();
 
-  // Hero：全库「最近观看」的第一条（后端按最近观看排序）
-  const hero = consoleData[0] || null;
-  els['c-hero'].classList.toggle('hidden', !hero);
-  if (hero) {
-    const node = buildHero(hero);
-    els['c-hero'].appendChild(node);
-    consoleRows.push({ kind: 'hero', nodes: [node] });
-  }
+  // 顶部不再放「最近观看」大卡：最近观看与继续观看已各有一行，
+  // 大卡只是重复同一部影片，白占半屏。首页直接从推荐看点开始。
 
-  // 最近观看封面卡行
-  const coverItems = consoleData.slice(0, CONSOLE_COVER_MAX);
-  for (const item of coverItems) {
-    els['c-cover-row'].appendChild(buildCard(item));
-  }
-  if (coverItems.length) {
-    consoleRows.push({ kind: 'cover', nodes: Array.from(els['c-cover-row'].children) });
-  }
-
-  // 分类胶囊行
-  const chips = renderConsoleChips(els['c-chips'], true);
-  if (chips.length) {
-    consoleRows.push({ kind: 'chips', nodes: chips });
-  }
+  // 推荐看点横排：卡片来自后端按高赞短评总结的 10 条核心看点，「换一批」重新随机
+  consoleRows.push({ kind: 'rec', nodes: paintConsoleRecRow() });
 
   // 继续观看宽幅卡行：有进度、未看完、未缺失，按最近观看排序取前若干
   const wideNodes = [];
@@ -3308,8 +4994,25 @@ function renderConsoleHome() {
     els['c-wide-row'].appendChild(built.wrap);
     wideNodes.push(built.card);
   }
+  els['c-wide-row'].parentElement.classList.toggle('hidden', !wideNodes.length);
   if (wideNodes.length) {
     consoleRows.push({ kind: 'wide', nodes: wideNodes });
+  }
+
+  // 最近观看封面卡行
+  const coverItems = consoleData.slice(0, CONSOLE_COVER_MAX);
+  for (const item of coverItems) {
+    els['c-cover-row'].appendChild(buildCard(item));
+  }
+  els['c-cover-row'].parentElement.classList.toggle('hidden', !coverItems.length);
+  if (coverItems.length) {
+    consoleRows.push({ kind: 'cover', nodes: Array.from(els['c-cover-row'].children) });
+  }
+
+  // 分类胶囊行
+  const chips = renderConsoleChips(els['c-chips'], true);
+  if (chips.length) {
+    consoleRows.push({ kind: 'chips', nodes: chips });
   }
 }
 
@@ -3398,8 +5101,10 @@ function clearConsoleFocus() {
   for (const band of consoleRows) {
     for (const node of band.nodes) {
       node.classList.remove('focused');
+      node.classList.remove('near');
     }
   }
+  els['c-focus-title'].textContent = '';
 }
 
 /** 把焦点节点滚入可视区：横向行做居中，纵向只滚最小距离（禁用 scrollIntoView，避免整屏跳动）。 */
@@ -3425,7 +5130,52 @@ function scrollConsoleTo(node) {
   }
 }
 
-/** 统一出口：清旧焦点 → 夹紧行列 → 给当前节点加焦点 → 滚入可视区。渲染末尾必须调用。 */
+/** 主机模式焦点停留预览：焦点在同一张卡片上停满设定秒数才展开。 */
+let consolePreviewTimer = null;
+
+function cancelConsolePreview() {
+  if (consolePreviewTimer) {
+    clearTimeout(consolePreviewTimer);
+    consolePreviewTimer = null;
+  }
+}
+
+function scheduleConsolePreview(item, node) {
+  cancelConsolePreview();
+  if (!consoleOn || !item || playingId || inMulti) {
+    return;
+  }
+  if (previewItemId === item.id) {
+    return; // 已经在预览这张，不重复起实例
+  }
+  if (!els['preview-toggle'].checked) {
+    return;
+  }
+  consolePreviewTimer = setTimeout(() => {
+    consolePreviewTimer = null;
+    startPreview(item, node);
+  }, previewDelayMs());
+}
+
+/** 鼠标移到主机模式卡片上时，把焦点同步到这张卡（键盘继续从该位置移动）。 */
+function focusConsoleNode(node) {
+  if (!consoleOn || !node) {
+    return;
+  }
+  for (let r = 0; r < consoleRows.length; r += 1) {
+    const col = consoleRows[r].nodes.indexOf(node);
+    if (col >= 0) {
+      if (consoleFocus.row === r && consoleFocus.col === col) {
+        return;
+      }
+      consoleFocus = { row: r, col, desiredCol: col };
+      applyConsoleFocus();
+      return;
+    }
+  }
+}
+
+/** 统一出口：清旧焦点 → 夹紧行列 → 给当前节点加焦点 → 滚入可视区 → 同步环境底与提示条。 */
 function applyConsoleFocus() {
   clearConsoleFocus();
   if (!consoleRows.length) {
@@ -3449,7 +5199,22 @@ function applyConsoleFocus() {
     return;
   }
   node.classList.add('focused');
+  // PS5 式选择：相邻卡片轻微后退，突出当前卡
+  const at = band.nodes.indexOf(node);
+  band.nodes.forEach((peer, i) => {
+    peer.classList.toggle('near', i !== at && Math.abs(i - at) <= 2);
+  });
   scrollConsoleTo(node);
+  // 沉浸式环境底与底部标题跟随焦点影片（分类胶囊等无条目的节点保持现状）
+  const item = consoleItemById(node.dataset ? node.dataset.id : '');
+  if (item) {
+    paintConsoleAmbient(item);
+    els['c-focus-title'].textContent = item.title || '';
+  } else {
+    els['c-focus-title'].textContent = '';
+  }
+  // 无论鼠标悬停还是主机焦点，停留够设定秒数即展开放大预览
+  scheduleConsolePreview(item, node);
 }
 
 function moveConsoleFocus(dRow, dCol) {
@@ -3494,6 +5259,7 @@ function activateConsoleFocus() {
   }
   const node = band.nodes[consoleFocus.col];
   if (node) {
+    stopPreview();
     node.click();
   }
 }
@@ -3538,6 +5304,7 @@ function onConsoleKey(event) {
   if (!consoleOn) {
     return;
   }
+  wakeConsole(); // 任何按键都让顶栏 / 提示条重新出现
   if (modalOpen()) {
     return; // 弹层存在时把键盘交给弹层，不改现有二选一语义
   }
@@ -3560,18 +5327,27 @@ function onConsoleKey(event) {
   }
 
   switch (event.key) {
+    // WSAD 与方向键同义：主机模式用键盘选片
+    case 'a':
+    case 'A':
     case 'ArrowLeft':
       event.preventDefault();
       moveConsoleFocus(0, -1);
       break;
+    case 'd':
+    case 'D':
     case 'ArrowRight':
       event.preventDefault();
       moveConsoleFocus(0, 1);
       break;
+    case 'w':
+    case 'W':
     case 'ArrowUp':
       event.preventDefault();
       moveConsoleFocus(-1, 0);
       break;
+    case 's':
+    case 'S':
     case 'ArrowDown':
       event.preventDefault();
       moveConsoleFocus(1, 0);
@@ -3624,17 +5400,49 @@ function openConsoleSearch() {
 // ---------------------------------------------------------------------------
 
 async function bindNativeEvents() {
-  // 画面窗口截获的点击：预览 → 进入播放页；正式播放 → 切换暂停
+  // 批量 / 自动刮削进度：整批结束时刷新封面与标签（封面文件可能刚被替换）
+  await listen('scrape-progress', (event) => {
+    const payload = event && event.payload ? event.payload : {};
+    updateScrapeProgress(payload);
+    if (payload.total && payload.done >= payload.total) {
+      coverCache.clear();
+      refresh();
+      reloadFilters();
+    }
+  });
+  // 画面窗口截获的点击：预览 → 打开详情（与直接点海报一致）；正式播放 → 切换暂停
   await listen('preview-click', () => {
     const id = previewItemId;
+    // 详情页里播的是预告片：点画面只收起预览，不跳播放页
+    if (!els['detail-modal'].classList.contains('hidden')) {
+      stopPreview();
+      return;
+    }
+    // 主机模式下画面点击只收起预览（详情弹层属于经典界面）
+    if (consoleOn) {
+      stopPreview();
+      return;
+    }
     const item = items.find((i) => i.id === id);
     stopPreview();
     if (item) {
-      openItem(item);
+      openDetail(item);
     }
   });
   await listen('player-click', () => {
+    if (!playingId) return;
+    // 控制条已收起时，点击画面只负责唤醒控制条，不误触暂停
+    if (playerBarHidden) {
+      revealPlayerBar();
+      return;
+    }
     togglePause();
+  });
+  await listen('player-move', () => {
+    if (!playingId) return;
+    // 刚收起控制条时画面窗口刚被撑开，这段窗口内的移动事件多为假事件
+    if (Date.now() < playerBarWakeBlockUntil) return;
+    revealPlayerBar();
   });
   // 多屏每格画面截获的点击：把该格切为发声窗（PRD FR-06 点击某格发声）
   await listen('multi-click', (event) => {
@@ -3656,9 +5464,59 @@ async function init() {
 
   els['add-btn'].addEventListener('click', addSource);
   els['scan-cancel'].addEventListener('click', cancelScan);
-  // 库管理：按源列条目数并整源清除（只删库内记录，不删硬盘文件）
+  // 库管理：左栏选源、右栏操作（只删库内记录，不删硬盘文件）
   els['manage-btn'].addEventListener('click', openManageModal);
   els['manage-close'].addEventListener('click', hideManageModal);
+  els['manage-close-2'].addEventListener('click', hideManageModal);
+  // 点遮罩关闭；点面板内部不关
+  els['manage-modal'].addEventListener('click', (event) => {
+    if (event.target === els['manage-modal']) {
+      hideManageModal();
+    }
+  });
+  // 元数据数据源：站点地址 + 登录 Cookie；保存即验证
+  els['meta-btn'].addEventListener('click', openMetaModal);
+  els['meta-save'].addEventListener('click', saveMetaSettings);
+  // 服务商切换：预置服务商自动带出接口地址与模型下拉
+  els['llm-provider'].addEventListener('change', () => {
+    applyLlmProvider(els['llm-provider'].value, '');
+  });
+  els['meta-scrape-all'].addEventListener('click', () => scrapeMissing(null));
+  els['meta-close'].addEventListener('click', () => els['meta-modal'].classList.add('hidden'));
+  // 条目详情：单击海报进入；播放正片 / 预告片、从数据源更新
+  els['detail-play'].addEventListener('click', playFromDetail);
+  els['detail-trailer'].addEventListener('click', playDetailTrailer);
+  els['detail-refresh'].addEventListener('click', scrapeCurrentItem);
+  els['detail-x'].addEventListener('click', hideDetail);
+  // 点击详情页以外的遮罩区域也关闭（点内容区不关）
+  els['detail-modal'].addEventListener('click', (event) => {
+    if (event.target === els['detail-modal']) {
+      hideDetail();
+    }
+  });
+  els['tag-back'].addEventListener('click', backFromTagBrowse);
+  els['lightbox'].addEventListener('click', closeLightbox);
+  // 预告片画面窗口已设为鼠标穿透，点击落到全屏遮罩上即关闭；
+  // 画面下方的进度条属于操作区，自身的点击不能冒泡触发关闭
+  els['trailer-stage'].addEventListener('click', stopPreview);
+  els['trailer-controls'].addEventListener('click', (event) => event.stopPropagation());
+  els['trailer-seek'].addEventListener('input', () => {
+    trailerSeeking = true;
+  });
+  els['trailer-seek'].addEventListener('change', async () => {
+    trailerSeeking = false;
+    if (!trailerDurationMs) return;
+    const positionMs = Math.round((Number(els['trailer-seek'].value) / 1000) * trailerDurationMs);
+    try {
+      await invoke('trailer_seek', { positionMs });
+    } catch (err) {
+      showToast(String(err));
+    }
+  });
+  els['trailer-close'].addEventListener('click', (event) => {
+    event.stopPropagation();
+    stopPreview();
+  });
   // 数据迁移（FR-07）：导出为包 / 从包导入
   els['data-btn'].addEventListener('click', openDataModal);
   els['data-export'].addEventListener('click', exportLibrary);
@@ -3677,6 +5535,9 @@ async function init() {
   els['preview-toggle'].addEventListener('change', () => {
     setPreviewEnabled(els['preview-toggle'].checked);
   });
+  // 放大预览舞台的控制条（位于原生画面窗口之外，可正常点击）
+  els['preview-sound'].addEventListener('click', togglePreviewSound);
+  els['preview-close'].addEventListener('click', stopPreview);
 
   // 检索区：搜索框输入防抖后即时生效；排序与海报尺寸切换同样即时生效
   els['search-input'].addEventListener('input', () => {
@@ -3703,6 +5564,41 @@ async function init() {
 
   els['pb-toggle'].addEventListener('click', togglePause);
   els['pb-close'].addEventListener('click', closePlayer);
+  // 播放器设置：快进时长 / 预览停留 / 预览声音
+  els['pb-settings'].addEventListener('click', () => {
+    if (els['player-settings'].classList.contains('hidden')) openPlayerSettings();
+    else closePlayerSettings();
+  });
+  els['pset-close'].addEventListener('click', closePlayerSettings);
+  els['pset-save'].addEventListener('click', savePlayerSettings);
+  for (const id of ['pset-forward', 'pset-preview-delay']) {
+    els[id].addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') savePlayerSettings();
+    });
+  }
+  document.addEventListener('click', (event) => {
+    if (els['player-settings'].classList.contains('hidden')) return;
+    if (event.target.closest('#player-settings') || event.target.closest('#pb-settings')) return;
+    closePlayerSettings();
+  });
+  // 播放中按右方向键快进（经典 / 主机模式播放页通用），左键保持系统默认
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowRight' || !playingId || inMulti) return;
+    if (isTypingTarget(event.target) || modalOpen()) return;
+    event.preventDefault();
+    revealPlayerBar();
+    forwardBy(forwardSeconds);
+  });
+  // 鼠标在页面层移动：唤醒自动隐藏的控制条（原生画面上的移动由后端转发）
+  let lastRevealAt = 0;
+  document.addEventListener('mousemove', () => {
+    if (!playingId) return;
+    if (Date.now() < playerBarWakeBlockUntil) return;
+    const now = Date.now();
+    if (!playerBarHidden && now - lastRevealAt < 800) return;
+    lastRevealAt = now;
+    revealPlayerBar();
+  });
   els['pb-seek'].addEventListener('input', () => { seeking = true; });
   els['pb-seek'].addEventListener('change', async () => {
     seeking = false;
@@ -3710,6 +5606,7 @@ async function init() {
       return;
     }
     const positionMs = Math.round((Number(els['pb-seek'].value) / 1000) * currentDurationMs);
+    lastPositionMs = positionMs;
     try {
       await invoke('seek', { positionMs });
     } catch (err) {
@@ -3755,6 +5652,7 @@ async function init() {
 
   // 主机模式（Console）：入口按钮 / 顶栏入口 / 设置浮层 / 尺寸组 / 资源库搜索框
   els['console-btn'].addEventListener('click', () => toggleConsole());
+  els['console'].addEventListener('mousemove', wakeConsole);
   els['c-search-btn'].addEventListener('click', openConsoleSearch);
   els['c-to-classic'].addEventListener('click', exitConsole);
   els['c-to-classic-2'].addEventListener('click', exitConsole);
@@ -3763,6 +5661,10 @@ async function init() {
   });
   els['c-settings-close'].addEventListener('click', () => {
     els['c-settings-panel'].classList.add('hidden');
+  });
+  // 推荐看点：换一批重新随机 10 条；尚未生成过看点的条目会请求大模型
+  els['c-rec-refresh'].addEventListener('click', () => {
+    loadConsoleRecommendations();
   });
   els['c-preview-toggle'].addEventListener('change', () => {
     setPreviewEnabled(els['c-preview-toggle'].checked);
@@ -3788,9 +5690,11 @@ async function init() {
   // 主机模式键盘导航：capture 阶段拦截方向键 / Enter / Esc / F10（F10 在经典界面下亦生效）
   window.addEventListener('keydown', onConsoleKey, { capture: true });
 
-  // 预览正在播放时，一旦指针离开其所占矩形就停止
+  // 预览正在播放时，一旦指针离开其所占矩形就停止。
+  // 详情页的预告片是手动点播：指针在按钮上（不在画面矩形内），不能因为动一下就停，
+  // 只由「点画面 / 关闭详情 / 5 分钟兜底」结束。
   window.addEventListener('mousemove', (event) => {
-    if (previewRect && pointerOutsidePreview(event)) {
+    if (els['detail-modal'].classList.contains('hidden') && previewRect && pointerOutsidePreview(event)) {
       stopPreview();
     }
   });
@@ -3799,6 +5703,8 @@ async function init() {
     stopPreview();
     // 窗口尺寸变化后格位矩形随之改变，重新摆放原生画面窗口
     if (inMulti && !browsingLibrary) placeAllSlots();
+    // 字幕叠层依赖可用画面高度与黑边，尺寸变化后重新定位
+    updateSubtitleStage();
     // 主机模式：卡片尺寸随窗口变化，焦点需要重新滚入可视区
     if (consoleOn) applyConsoleFocus();
   });

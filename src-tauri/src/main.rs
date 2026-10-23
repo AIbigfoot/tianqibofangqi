@@ -15,29 +15,35 @@ mod store;
 mod subtitle;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use cinema_adapters::javdb::JavdbProvider;
+use cinema_adapters::llm::{local_highlight, summarize_highlights, HighlightInput, LlmConfig};
+use cinema_adapters::websearch::search_snippets;
 use cinema_adapters::media_source::{
-    normalize_local_root, DirectUrlProvider, LanPathProvider, LocalFolderProvider,
+    normalize_local_root, DirectUrlProvider, FileListProvider, LanPathProvider, LocalFolderProvider,
 };
 use cinema_adapters::mpv::MpvProber;
 use cinema_adapters::online_site::{DownloadRegistry, DownloadState, OnlineSiteProvider};
 use cinema_adapters::player::MpvPlayerCore;
 use cinema_app::decode_quota::DecodeQuota;
 use cinema_app::import_service::{ImportService, ScanControl, ScanReporter};
+use cinema_app::metadata_service::{MetadataService, MetadataStore};
 use cinema_app::playback_service::{PlaybackService, PreviewRequest};
 use cinema_app::portability_service::PortabilityService;
 use cinema_app::progress_service::ProgressService;
 use cinema_app::search_service::{SearchQuery, SearchService, SearchStore};
 use cinema_domain::error::{PortError, Result as PortResult};
 use cinema_domain::model::{
-    ItemId, MediaItem, MediaSource, PlayableRef, PlayerCmd, PlayerEvent, Progress, ScanProgress,
-    ScanStage, SourceId, SourceKind, SourceState, StreamFacts, TrackSelection,
+    ItemId, MediaItem, MediaSource, PlayableRef, PlayerCmd, PlayerEvent, Progress, ScrapedComment,
+    ScrapeState, ScanProgress, ScanStage, SourceId, SourceKind, SourceState, StreamFacts,
+    TrackSelection,
 };
+use cinema_domain::ports::javdb::{JavdbClient, JavdbConfig};
 use cinema_domain::ports::media_source::MediaSourceProvider;
 use cinema_domain::ports::player::PlayerCore;
 use cinema_domain::ports::tag_dimension::TagDimensionDef;
@@ -45,10 +51,13 @@ use cinema_domain::rules::{
     preview_allowed, ExitPolicy, Layout, ResumePolicy, SortMode, PREVIEW_SEGMENT_MS,
     PREVIEW_TRIGGER_MS,
 };
+use cinema_domain::tagging::{DIM_ACTOR, DIM_CATEGORY, DIM_DIRECTOR, DIM_MAKER, DIM_SERIES};
 use cinema_infra::db::Database;
-use cinema_infra::repo::{MediaItemRepo, MediaSourceRepo};
+use cinema_infra::repo::{
+    CachedHighlight, CommentedItem, MediaItemRepo, MediaSourceRepo, MetadataRepo, SourceRootRepo,
+};
 use cinema_infra::subtitle_repo::SettingRepo;
-use cinema_infra::tag_repo::DimensionRepo;
+use cinema_infra::tag_repo::{DimensionRepo, ItemTagRepo, SearchIndexRepo, TagRepo};
 
 use host_window::HostWindow;
 use player::{FactoryHandle, MpvPlayerFactory};
@@ -62,6 +71,28 @@ const KEY_MAX_SCREENS: &str = "multi_screen.max_screens";
 
 /// 并发发声开关在 `setting` 表中的键（默认关闭，硬约束 C6：新增能力默认关闭）。
 const KEY_CONCURRENT_AUDIO: &str = "multi_screen.concurrent_audio";
+
+/// 元数据数据源地址（`setting` 表）：站点域名会变，必须可配置。
+const KEY_JAVDB_BASE_URL: &str = "javdb.base_url";
+/// 元数据数据源登录 Cookie（`setting` 表）：评论与预告片需要登录态。
+const KEY_JAVDB_COOKIE: &str = "javdb.cookie";
+/// 默认站点：`javdb580.com` 早已失效，实测可用域名是 `javdb575.com`。
+const DEFAULT_JAVDB_BASE_URL: &str = "https://javdb575.com";
+
+/// 推荐看点所用大模型（OpenAI 兼容接口）的配置键。
+const KEY_LLM_BASE_URL: &str = "llm.base_url";
+const KEY_LLM_API_KEY: &str = "llm.api_key";
+const KEY_LLM_MODEL: &str = "llm.model";
+const KEY_LLM_PROVIDER: &str = "llm.provider";
+/// 默认接 DeepSeek 的 OpenAI 兼容端点：国内可直连，接口协议通用。
+const DEFAULT_LLM_BASE_URL: &str = "https://api.deepseek.com/v1";
+const DEFAULT_LLM_MODEL: &str = "deepseek-chat";
+/// 预置服务商：用户只需选服务商 + 填密钥，地址与模型由这里固化。
+const DEEPSEEK_MODELS: [&str; 2] = ["deepseek-chat", "deepseek-reasoner"];
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const OPENAI_MODELS: [&str; 2] = ["gpt-4o-mini", "gpt-4o"];
+/// 推荐横排默认条数。
+const RECOMMEND_LIMIT: usize = 10;
 
 /// 画面宿主窗口：多屏按屏位各一个，另加一个悬停预览窗口（PRD FR-06）。
 #[derive(Default)]
@@ -120,6 +151,13 @@ struct AppState {
     covers_inflight: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// 当前扫描的取消位。界面点「取消」置位，扫描就地收尾（见 `cancel_scan`）。
     scan_cancel: Arc<AtomicBool>,
+    /// 元数据数据源客户端（HTTP 抓取与解析）。
+    javdb: Arc<JavdbProvider>,
+    /// 正在刮削的条目 id：自动刮削与手动重刮可能并发，同一时间只允许一条在途。
+    scraping: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// 单路播放时画面底部额外留出的物理像素（字幕菜单 / 弹层打开时让出空间，
+    /// 否则原生画面窗口会盖住这些 HTML 控件，点击落到画面上表现为「控件没反应」）。
+    player_extra_reserve: AtomicI32,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +175,8 @@ struct SourceView {
     item_count: u64,
     /// 最近一次扫描失败的原因（PRD FR-01 异常表）。无失败时为 `None`。
     last_error: Option<String>,
+    /// 合并进来的附加目录（只登记，不移动文件）。
+    extra_roots: Vec<String>,
 }
 
 /// 导出 / 导入的回执（PRD FR-07）。
@@ -168,6 +208,121 @@ struct ItemView {
     missing: bool,
     /// 有真实封面可展示（在线站点源抓到的封面；本地源一律为 false，由前端生成占位图）。
     has_poster: bool,
+}
+
+/// 元数据数据源设置回执（`javdb_settings` / `save_javdb_settings`）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JavdbSettingsView {
+    base_url: String,
+    has_cookie: bool,
+    logged_in: bool,
+    username: Option<String>,
+    /// 站点或探测过程给出的可读提示（Cookie 失效 / 站点不可达 / 登录成功）。
+    message: Option<String>,
+}
+
+/// 一次刮削的回执。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScrapeResultView {
+    item_id: String,
+    state: String,
+    comments: usize,
+    screenshots: usize,
+    trailer_saved: bool,
+    /// 失败原因（成功时为 `None`）。
+    message: Option<String>,
+}
+
+/// 批量刮削的进度事件（`scrape-progress`）载荷。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ScrapeProgressView {
+    item_id: String,
+    done: usize,
+    total: usize,
+}
+
+/// 详情页里的一条短评。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentView {
+    author: Option<String>,
+    score: Option<i32>,
+    content: String,
+    likes: u32,
+    posted_at: Option<String>,
+}
+
+/// 条目详情（海报单击进入）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ItemDetailView {
+    id: String,
+    title: String,
+    code: Option<String>,
+    release_date: Option<String>,
+    duration_ms: Option<i64>,
+    rating: Option<f32>,
+    detail_url: Option<String>,
+    has_poster: bool,
+    /// 截图文件名（前端再调 `item_screenshot` 取 data URL）。
+    screenshots: Vec<String>,
+    comments: Vec<CommentView>,
+    categories: Vec<String>,
+    series: Vec<String>,
+    maker: Vec<String>,
+    director: Vec<String>,
+    actors: Vec<String>,
+    has_trailer: bool,
+    trailer_url: Option<String>,
+    /// `pending` | `running` | `done` | `failed` | `no_code`。
+    scrape_state: String,
+    scrape_error: Option<String>,
+}
+
+/// 大模型配置回执（界面只关心是否已配置，不回显密钥）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmSettingsView {
+    /// `deepseek` | `openai` | `custom`。
+    provider: String,
+    base_url: String,
+    model: String,
+    has_key: bool,
+}
+
+/// 推荐横排的一张卡片：影片信息 + 一句核心看点。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecommendItemView {
+    item_id: String,
+    title: String,
+    code: Option<String>,
+    rating: Option<f32>,
+    has_poster: bool,
+    /// 由高赞短评总结出的核心看点。
+    highlight: String,
+    /// 用来展示「多少人认同」的最高赞数。
+    likes: u32,
+    /// 参与总结的高赞短评条数（界面标注来源用）。
+    comments: usize,
+    /// 除短评外参与总结的资料条数（简介 / 标签 / 联网结果）。
+    sources: usize,
+    /// `llm` | `local`。
+    source: String,
+}
+
+/// 一次推荐的结果。`llm=false` 表示本次走的是本地兜底提炼。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecommendView {
+    items: Vec<RecommendItemView>,
+    llm: bool,
+    /// 本次是否真的发起了大模型请求（都命中缓存时为 false）。
+    requested: bool,
+    message: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -305,6 +460,16 @@ struct PreviewResultView {
     reason: Option<String>,
 }
 
+/// 预告片播放进度（详情页画面下方的进度条用）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrailerStatusView {
+    /// 预览实例是否仍在（停止后为 false）。
+    active: bool,
+    position_ms: i64,
+    duration_ms: Option<i64>,
+}
+
 /// 一路多屏窗口的状态（PRD FR-06「每格能力与规则」）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -330,7 +495,7 @@ struct MultiSlotView {
 struct MultiScreenView {
     slots: Vec<MultiSlotView>,
     speaker: Option<u32>,
-    /// 布局标记（`1x2` / `2x1` / `2x2` / `1plus3`）。
+    /// 布局标记（`1x2` / `2x1` / `2x2` / `1plus3` / `3x3`）。
     layout: String,
     layout_label: String,
     /// 同时播放上限（默认 4，可在设置中调整）。
@@ -562,6 +727,524 @@ fn load_item(state: &AppState, item_id: &str) -> std::result::Result<(MediaItem,
     Ok((item, src))
 }
 
+// ---------------------------------------------------------------------------
+// 元数据刮削：配置读取、状态标签与落盘路径
+// ---------------------------------------------------------------------------
+
+/// 从设置表读取数据源配置。站点地址为空时回落到内置镜像（`javdb580.com` 已失效）。
+fn javdb_config_from(db: &Database) -> JavdbConfig {
+    let base_url = SettingRepo::get(db.conn(), KEY_JAVDB_BASE_URL)
+        .ok()
+        .flatten()
+        .map(|raw| normalize_base_url(&raw))
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| DEFAULT_JAVDB_BASE_URL.to_owned());
+    let cookie = SettingRepo::get(db.conn(), KEY_JAVDB_COOKIE)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    JavdbConfig {
+        base_url,
+        cookie: cookie.trim().to_owned(),
+    }
+}
+
+/// 规范化用户填写的站点地址：补 `https://`、去掉尾部斜杠与路径外的空白。
+fn normalize_base_url(raw: &str) -> String {
+    let mut url = raw.trim().trim_end_matches('/').to_owned();
+    if url.is_empty() {
+        return String::new();
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        url = format!("https://{url}");
+    }
+    url
+}
+
+// ---------------------------------------------------------------------------
+// 推荐看点（P-07）：高赞短评 → 大模型总结 → 主机模式横排
+// ---------------------------------------------------------------------------
+
+/// 从设置表读取大模型配置。未填写的项回落到默认值；密钥为空即视为未配置。
+fn llm_config_from(db: &Database) -> LlmConfig {
+    let read = |key: &str| {
+        SettingRepo::get(db.conn(), key)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
+    let base = normalize_base_url(&read(KEY_LLM_BASE_URL));
+    let model = read(KEY_LLM_MODEL).trim().to_owned();
+    LlmConfig {
+        base_url: if base.is_empty() {
+            DEFAULT_LLM_BASE_URL.to_owned()
+        } else {
+            base
+        },
+        api_key: read(KEY_LLM_API_KEY).trim().to_owned(),
+        model: if model.is_empty() {
+            DEFAULT_LLM_MODEL.to_owned()
+        } else {
+            model
+        },
+    }
+}
+
+fn llm_settings_view(config: &LlmConfig, provider: &str) -> LlmSettingsView {
+    LlmSettingsView {
+        provider: provider.to_owned(),
+        base_url: config.base_url.clone(),
+        model: config.model.clone(),
+        has_key: !config.api_key.is_empty(),
+    }
+}
+
+/// 识别当前服务商：优先用已保存的选择；没有记录时按接口地址推断。
+fn llm_provider_from(db: &Database, config: &LlmConfig) -> &'static str {
+    let stored = SettingRepo::get(db.conn(), KEY_LLM_PROVIDER)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    match stored.trim() {
+        "deepseek" => "deepseek",
+        "openai" => "openai",
+        "custom" => "custom",
+        _ => {
+            if config.base_url.contains("deepseek") {
+                "deepseek"
+            } else if config.base_url.contains("openai") {
+                "openai"
+            } else {
+                "custom"
+            }
+        }
+    }
+}
+
+/// 读取大模型配置（不回显密钥，只回报是否已配置）。
+#[tauri::command]
+fn llm_settings(state: State<'_, AppState>) -> std::result::Result<LlmSettingsView, String> {
+    let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+    let config = llm_config_from(&db);
+    let provider = llm_provider_from(&db, &config);
+    Ok(llm_settings_view(&config, provider))
+}
+
+/// 保存大模型配置。密钥留空表示保留已保存的密钥（与 Cookie 的处理方式一致）。
+///
+/// 预置服务商（DeepSeek / OpenAI）的接口地址与可选模型由后端固化，界面只让用户选模型；
+/// 「自定义」才使用界面上填的地址与模型名。
+#[tauri::command]
+fn save_llm_settings(
+    state: State<'_, AppState>,
+    provider: String,
+    base_url: String,
+    api_key: String,
+    model: String,
+) -> std::result::Result<LlmSettingsView, String> {
+    let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+    let provider = match provider.trim() {
+        "openai" => "openai",
+        "custom" => "custom",
+        _ => "deepseek",
+    };
+    let model = |fallback: &str| {
+        let raw = model.trim();
+        if raw.is_empty() {
+            fallback.to_owned()
+        } else {
+            raw.to_owned()
+        }
+    };
+    let (base, model) = match provider {
+        "openai" => (OPENAI_BASE_URL.to_owned(), model("gpt-4o-mini")),
+        "custom" => {
+            let base = normalize_base_url(&base_url);
+            let base = if base.is_empty() {
+                DEFAULT_LLM_BASE_URL.to_owned()
+            } else {
+                base
+            };
+            (base, model(DEFAULT_LLM_MODEL))
+        }
+        _ => (DEFAULT_LLM_BASE_URL.to_owned(), model(DEFAULT_LLM_MODEL)),
+    };
+    // 预置服务商只接受列表内的模型名，避免手填错字导致每次都调用失败
+    let allowed: &[&str] = match provider {
+        "openai" => &OPENAI_MODELS,
+        "custom" => &[],
+        _ => &DEEPSEEK_MODELS,
+    };
+    let model = if allowed.is_empty() || allowed.contains(&model.as_str()) {
+        model
+    } else {
+        allowed.first().copied().unwrap_or(DEFAULT_LLM_MODEL).to_owned()
+    };
+    let key = api_key.trim();
+    if !key.is_empty() {
+        SettingRepo::set(db.conn(), KEY_LLM_API_KEY, key).map_err(|e| e.to_string())?;
+    }
+    SettingRepo::set(db.conn(), KEY_LLM_PROVIDER, provider).map_err(|e| e.to_string())?;
+    SettingRepo::set(db.conn(), KEY_LLM_BASE_URL, &base).map_err(|e| e.to_string())?;
+    SettingRepo::set(db.conn(), KEY_LLM_MODEL, &model).map_err(|e| e.to_string())?;
+    let config = llm_config_from(&db);
+    Ok(llm_settings_view(&config, provider))
+}
+
+/// 推荐横排的一条候选：影片 + 该片的短评 + 可能已有的缓存。
+struct RecommendPick {
+    item: CommentedItem,
+    comments: Vec<ScrapedComment>,
+    cached: Option<CachedHighlight>,
+}
+
+/// 推荐看点：随机挑若干部带短评的影片，把高赞评论总结成一句核心看点。
+///
+/// 「换一批」优先取还没生成过的条目，确保每批都有新内容；生成过的直接读缓存，
+/// 不再请求大模型。大模型不可用时退回本地提炼，不让界面空着。
+#[tauri::command]
+async fn recommend_highlights(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> std::result::Result<RecommendView, String> {
+    let limit = limit.unwrap_or(RECOMMEND_LIMIT).clamp(1, 30);
+    let (mut picks, config) = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        let config = llm_config_from(&db);
+        let candidates = MetadataRepo::commented_items(db.conn()).map_err(|e| e.to_string())?;
+        if candidates.is_empty() {
+            return Ok(RecommendView {
+                items: Vec::new(),
+                llm: config.ready(),
+                requested: false,
+                message: Some(
+                    "库内还没有带短评的影片：先在「元数据」里补齐全库，再来看看推荐".into(),
+                ),
+            });
+        }
+        let cached = MetadataRepo::cached_highlights(db.conn()).map_err(|e| e.to_string())?;
+        // 评论条数变了说明重新刮削过，旧看点已过期，按未生成处理
+        let mut fresh: Vec<CommentedItem> = Vec::new();
+        let mut known: Vec<(CommentedItem, CachedHighlight)> = Vec::new();
+        for item in candidates {
+            match cached.get(&item.id.0) {
+                // 配置了大模型后，旧的「本地提炼」缓存视为未生成，让下次刷新改用大模型
+                Some(highlight)
+                    if highlight.comment_count == item.comment_count
+                        && !(config.ready() && highlight.source == "local") =>
+                {
+                    known.push((item, highlight.clone()));
+                }
+                _ => fresh.push(item),
+            }
+        }
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x5eed);
+        shuffle_in_place(&mut fresh, seed);
+        shuffle_in_place(&mut known, seed ^ 0x9e37_79b9);
+
+        let take_fresh = fresh.len().min(limit);
+        let mut picks: Vec<RecommendPick> = Vec::new();
+        for item in fresh.into_iter().take(take_fresh) {
+            let comments = MetadataRepo::comments(db.conn(), &item.id).unwrap_or_default();
+            picks.push(RecommendPick {
+                item,
+                comments,
+                cached: None,
+            });
+        }
+        for (item, highlight) in known.into_iter().take(limit - take_fresh) {
+            let comments = MetadataRepo::comments(db.conn(), &item.id).unwrap_or_default();
+            picks.push(RecommendPick {
+                item,
+                comments,
+                cached: Some(highlight),
+            });
+        }
+        (picks, config)
+    };
+
+    let mut message = None;
+    let mut llm_used = config.ready();
+    let mut requested = false;
+    if picks.iter().any(|pick| pick.cached.is_none()) {
+        // 先把要总结的条目整理成「标题 + 番号 + 高赞评论」，在阻塞线程里一次性请求
+        let pending: Vec<usize> = picks
+            .iter()
+            .enumerate()
+            .filter(|(_, pick)| pick.cached.is_none())
+            .map(|(idx, _)| idx)
+            .collect();
+        let payload: Vec<HighlightInput> = pending
+            .iter()
+            .map(|&idx| {
+                let pick = &picks[idx];
+                HighlightInput {
+                    title: pick.item.title.clone(),
+                    code: pick.item.code.clone(),
+                    overview: pick.item.overview.clone(),
+                    tags: pick.item.tags.clone(),
+                    comments: pick.comments.clone(),
+                    web: Vec::new(),
+                }
+            })
+            .collect();
+
+        let mut generated: Vec<Option<String>> = vec![None; pending.len()];
+        let mut extra_counts: Vec<usize> = vec![0; pending.len()];
+        if config.ready() {
+            let cfg = config.clone();
+            requested = true;
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                let mut extra_counts: Vec<usize> = Vec::with_capacity(payload.len());
+                let enriched: Vec<HighlightInput> = payload
+                    .into_iter()
+                    .map(|mut input| {
+                        // 联网检索：按番号精确过滤，避免把相邻番号的资料喂给模型
+                        let query = recommend_search_query(&input.code, &input.title);
+                        input.web = if query.is_empty() {
+                            Vec::new()
+                        } else {
+                            search_snippets(&query, input.code.as_deref()).unwrap_or_default()
+                        };
+                        // 简介、标签与联网结果都算「短评之外的资料」
+                        let extra = input.web.len()
+                            + usize::from(!input.overview.trim().is_empty())
+                            + input.tags.split('、').filter(|tag| !tag.trim().is_empty()).count();
+                        extra_counts.push(extra);
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        input
+                    })
+                    .collect();
+                (summarize_highlights(&cfg, &enriched), extra_counts)
+            })
+            .await;
+            match result {
+                Ok((Ok(list), counts)) => {
+                    generated = list;
+                    extra_counts = counts;
+                }
+                Ok((Err(err), _)) => {
+                    message = Some(format!("大模型总结失败，已改用本地提炼：{}", err.reason()));
+                }
+                Err(err) => message = Some(format!("总结任务异常，已改用本地提炼：{err}")),
+            }
+        } else {
+            llm_used = false;
+            message = Some(
+                "未配置大模型：当前按高赞评论本地提炼；可在「元数据」里选择服务商并填写 API Key"
+                    .into(),
+            );
+        }
+
+        {
+            let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+            for (slot, &idx) in pending.iter().enumerate() {
+                let text = generated
+                    .get(slot)
+                    .and_then(|text| text.clone())
+                    .unwrap_or_else(|| fallback_highlight(&picks[idx].comments));
+                let source = if generated.get(slot).and_then(|t| t.as_ref()).is_some() {
+                    "llm"
+                } else {
+                    "local"
+                };
+                let extra_count = if source == "llm" {
+                    extra_counts.get(slot).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                let _ = MetadataRepo::save_highlight(
+                    db.conn(),
+                    &picks[idx].item.id,
+                    &text,
+                    picks[idx].item.comment_count,
+                    extra_count as i64,
+                    source,
+                    if source == "llm" {
+                        Some(config.model.as_str())
+                    } else {
+                        None
+                    },
+                );
+                picks[idx].cached = Some(CachedHighlight {
+                    text,
+                    comment_count: picks[idx].item.comment_count,
+                    source: source.to_owned(),
+                    extra_count: extra_count as i64,
+                });
+            }
+        }
+    }
+
+    let mut items: Vec<RecommendItemView> = picks
+        .into_iter()
+        .filter_map(|pick| {
+            let highlight = pick.cached?;
+            let text = if highlight.text.trim().is_empty() {
+                fallback_highlight(&pick.comments)
+            } else {
+                highlight.text
+            };
+            Some(RecommendItemView {
+                item_id: pick.item.id.0.clone(),
+                title: pick.item.title.clone(),
+                code: pick.item.code.clone(),
+                rating: pick.item.rating,
+                has_poster: pick.item.has_poster,
+                highlight: text,
+                likes: pick.comments.first().map(|c| c.likes).unwrap_or(0),
+                comments: pick.comments.len().min(10),
+                sources: highlight.extra_count.max(0) as usize,
+                source: highlight.source,
+            })
+        })
+        .collect();
+    let order_seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1);
+    shuffle_in_place(&mut items, order_seed);
+
+    Ok(RecommendView {
+        items,
+        llm: llm_used,
+        requested,
+        message,
+    })
+}
+
+/// 联网检索用的关键词：番号优先（能精确命中同一部片），再补片名与「影评 看点」。
+fn recommend_search_query(code: &Option<String>, title: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(code) = code.as_deref().map(str::trim).filter(|code| !code.is_empty()) {
+        parts.push(code.to_owned());
+    }
+    let title = title.trim();
+    if !title.is_empty() && !parts.iter().any(|part| part == title) {
+        parts.push(title.to_owned());
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    parts.push("影评 看点".to_owned());
+    parts.join(" ")
+}
+
+/// 本地兜底：评论太短或没有可用句子时，至少给一句原文摘录，避免出现空卡片。
+fn fallback_highlight(comments: &[ScrapedComment]) -> String {
+    let local = local_highlight(comments);
+    if !local.is_empty() {
+        return local;
+    }
+    comments
+        .first()
+        .map(|comment| comment.content.trim().chars().take(48).collect::<String>())
+        .unwrap_or_default()
+}
+
+/// 无第三方依赖的洗牌（xorshift）：推荐只需要「每次顺序不同」，不需要密码学随机。
+fn shuffle_in_place<T>(slice: &mut [T], seed: u64) {
+    let mut state = seed | 1;
+    for i in (1..slice.len()).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let j = (state % (i as u64 + 1)) as usize;
+        slice.swap(i, j);
+    }
+}
+
+fn scrape_state_label(state: ScrapeState) -> &'static str {
+    match state {
+        ScrapeState::Pending => "pending",
+        ScrapeState::Running => "running",
+        ScrapeState::Done => "done",
+        ScrapeState::Failed => "failed",
+        ScrapeState::NoCode => "no_code",
+    }
+}
+
+/// 本地预告片路径：条目登记了文件名且文件确实存在。
+fn trailer_path(item: &MediaItem) -> Option<PathBuf> {
+    let name = item.trailer_file.as_deref()?;
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return None;
+    }
+    let path = data_dir().ok()?.join("trailers").join(name);
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// 把图片字节包成 data URL（截图与封面共用）。
+fn image_data_url(bytes: &[u8]) -> String {
+    let mime = if bytes.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"\x89PNG") {
+        "image/png"
+    } else if bytes.starts_with(b"RIFF") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    };
+    format!("data:{mime};base64,{}", base64_encode(bytes))
+}
+
+/// 在途去重：返回 `false` 表示这条正在刮削（自动与手动可能同时到达）。
+fn begin_scrape(inflight: &std::sync::Mutex<std::collections::HashSet<String>>, id: &str) -> bool {
+    match inflight.lock() {
+        Ok(mut set) => set.insert(id.to_owned()),
+        Err(_) => false,
+    }
+}
+
+fn end_scrape(inflight: &std::sync::Mutex<std::collections::HashSet<String>>, id: &str) {
+    if let Ok(mut set) = inflight.lock() {
+        set.remove(id);
+    }
+}
+
+/// 扫描结束后自动刮削该源里「待刮削 / 上次失败」的条目（后台线程，失败静默）。
+fn spawn_auto_scrape(state: &AppState, source_id: SourceId) {
+    let config = match state.db.lock() {
+        Ok(db) => javdb_config_from(&db),
+        Err(_) => return,
+    };
+    let store = Arc::clone(&state.store);
+    let client = Arc::clone(&state.javdb);
+    let inflight = Arc::clone(&state.scraping);
+    let app = state.app.clone();
+    std::thread::spawn(move || {
+        let Ok(ids) = store.pending_ids(Some(&source_id)) else {
+            return;
+        };
+        let total = ids.len();
+        for (idx, id) in ids.iter().enumerate() {
+            if !begin_scrape(&inflight, &id.0) {
+                continue;
+            }
+            let outcome = MetadataService::new(client.as_ref(), store.as_ref())
+                .scrape_one(id, &config, false);
+            end_scrape(&inflight, &id.0);
+            // 单条失败不影响同批其余条目：状态已写入库，界面刷新时可见
+            let _ = outcome;
+            let _ = app.emit(
+                "scrape-progress",
+                ScrapeProgressView {
+                    item_id: id.0.clone(),
+                    done: idx + 1,
+                    total,
+                },
+            );
+        }
+    });
+}
+
 fn stop_preview_inner(state: &AppState) {
     if let Ok(mut svc) = state.playback.lock() {
         svc.stop_preview();
@@ -570,6 +1253,7 @@ fn stop_preview_inner(state: &AppState) {
     state.factory.forget_preview();
     if let Ok(hosts) = state.hosts.lock() {
         if let Some(host) = &hosts.preview {
+            host.set_click_through(false);
             host.hide();
         }
     }
@@ -914,6 +1598,68 @@ fn multi_view(state: &AppState) -> MultiScreenView {
 // 入库（FR-01）
 // ---------------------------------------------------------------------------
 
+/// 主机模式进入前的窗口状态（只保存主窗口一份）：用于退出时精确还原。
+struct ConsoleWindowBackup {
+    position: (i32, i32),
+    size: (u32, u32),
+    maximized: bool,
+    decorated: bool,
+}
+
+static CONSOLE_WINDOW_BACKUP: Mutex<Option<ConsoleWindowBackup>> = Mutex::new(None);
+
+/// 主机模式：整窗切成无边框全屏（不改变分辨率），退出时还原进入前的窗口状态。
+/// 备份只写一次：重复进入不会把「全屏后的窗口」当成原始状态。
+#[tauri::command]
+fn set_console_fullscreen(
+    window: tauri::WebviewWindow,
+    enabled: bool,
+) -> std::result::Result<(), String> {
+    if enabled {
+        {
+            let mut backup = CONSOLE_WINDOW_BACKUP
+                .lock()
+                .map_err(|_| "窗口状态锁不可用".to_string())?;
+            if backup.is_none() {
+                let position = window.outer_position().map_err(|e| e.to_string())?;
+                // 存客户区尺寸：`set_size` 的语义是内尺寸，还原时再加回边框才不会越还原越大
+                let size = window.inner_size().map_err(|e| e.to_string())?;
+                *backup = Some(ConsoleWindowBackup {
+                    position: (position.x, position.y),
+                    size: (size.width, size.height),
+                    maximized: window.is_maximized().unwrap_or(false),
+                    decorated: window.is_decorated().unwrap_or(true),
+                });
+            }
+        }
+        // 先去掉标题栏再全屏：Windows 下即无边框全屏，不切换显示器分辨率
+        window.set_decorations(false).map_err(|e| e.to_string())?;
+        window.set_fullscreen(true).map_err(|e| e.to_string())?;
+    } else {
+        window.set_fullscreen(false).map_err(|e| e.to_string())?;
+        let backup = CONSOLE_WINDOW_BACKUP
+            .lock()
+            .map_err(|_| "窗口状态锁不可用".to_string())?
+            .take();
+        if let Some(backup) = backup {
+            window
+                .set_decorations(backup.decorated)
+                .map_err(|e| e.to_string())?;
+            if backup.maximized {
+                window.maximize().map_err(|e| e.to_string())?;
+            } else {
+                window
+                    .set_size(tauri::PhysicalSize::new(backup.size.0, backup.size.1))
+                    .map_err(|e| e.to_string())?;
+                window
+                    .set_position(tauri::PhysicalPosition::new(backup.position.0, backup.position.1))
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn add_local_source(state: State<'_, AppState>, path: String) -> std::result::Result<SourceView, String> {
     // 裸盘符（`D:`）是相对路径，存的、扫的都会变成「进程当前目录」而不是盘根：
@@ -949,6 +1695,7 @@ fn add_local_source(state: State<'_, AppState>, path: String) -> std::result::Re
         // 刚登记的源还没扫描，条目数一定是 0（扫描完成后前端会重新拉清单）
         item_count: 0,
         last_error: None,
+        extra_roots: Vec::new(),
     })
 }
 
@@ -976,6 +1723,7 @@ fn list_sources(state: State<'_, AppState>) -> std::result::Result<Vec<SourceVie
             item_count: MediaItemRepo::count_by_source(db.conn(), &s.id)
                 .map_err(|e| e.to_string())?,
             last_error,
+            extra_roots: SourceRootRepo::list(db.conn(), &s.id).map_err(|e| e.to_string())?,
         });
     }
     Ok(out)
@@ -1004,6 +1752,12 @@ async fn scan_source(
     let cancel = Arc::clone(&state.scan_cancel);
     cancel.store(false, Ordering::SeqCst);
 
+    // 合并目录：主根之外登记进来的附加根。只登记不移动文件，条目记绝对路径
+    let extra_roots = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        SourceRootRepo::list(db.conn(), &src.id).map_err(|e| e.to_string())?
+    };
+
     let store = Arc::clone(&state.store);
     let prober = state.prober.clone();
     let downloads = Arc::clone(&state.downloads);
@@ -1016,25 +1770,66 @@ async fn scan_source(
     // 界面需要立刻知道「已经开始了」，而不是盯着按钮猜
     reporter.report(&ScanProgress::default());
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let scanned_source = src.id.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
         let provider = provider_for(&src, prober.as_ref(), &downloads)
             .map_err(|e| e.reason().to_string())?;
         let control = ScanControl {
-            reporter: Some(reporter),
-            cancel: Some(cancel),
+            reporter: Some(Arc::clone(&reporter)),
+            cancel: Some(Arc::clone(&cancel)),
         };
         let report = ImportService::import_with(store.as_ref(), provider.as_ref(), &src, &control)
             .map_err(|e| e.reason().to_string())?;
+        let mut discovered = report.stat.discovered;
+        let mut stored = report.stored;
+        let mut probed = report.probed;
+        let mut skipped = report.stat.skipped;
+        let mut cancelled = report.cancelled;
+
+        for root in &extra_roots {
+            if cancelled {
+                break;
+            }
+            let root_path = PathBuf::from(root);
+            let merged: Box<dyn MediaSourceProvider> = match prober.as_ref() {
+                Some(p) => Box::new(LocalFolderProvider::with_prober_absolute(
+                    &root_path,
+                    Arc::clone(p),
+                )),
+                None => Box::new(LocalFolderProvider::new_absolute(&root_path)),
+            };
+            // 单个附加目录坏了不扩大为整次扫描失败：跳过它，其余根继续
+            if let Ok(part) =
+                ImportService::import_with(store.as_ref(), merged.as_ref(), &src, &control)
+            {
+                discovered += part.stat.discovered;
+                stored += part.stored;
+                probed += part.probed;
+                skipped += part.stat.skipped;
+                cancelled = part.cancelled;
+            } else {
+                skipped += 1;
+            }
+        }
+
         Ok::<ImportReportView, String>(ImportReportView {
-            discovered: report.stat.discovered,
-            stored: report.stored,
-            probed: report.probed,
-            skipped: report.stat.skipped,
-            cancelled: report.cancelled,
+            discovered,
+            stored,
+            probed,
+            skipped,
+            cancelled,
         })
     })
     .await
-    .map_err(|e| format!("扫描任务异常中止：{e}"))?
+    .map_err(|e| format!("扫描任务异常中止：{e}"))?;
+
+    // 扫描成功（未被取消）后自动刮削该源的待刮条目：新入库的条目默认 `pending`
+    if let Ok(view) = &report {
+        if !view.cancelled {
+            spawn_auto_scrape(&state, scanned_source);
+        }
+    }
+    report
 }
 
 /// 请求中止当前扫描。已入库的条目保留，源不会被置为「扫描失败」。
@@ -1089,6 +1884,127 @@ async fn clear_source(state: State<'_, AppState>, id: String) -> std::result::Re
     })
     .await
     .map_err(|e| format!("清除任务异常中止：{e}"))?
+}
+
+/// 把一个目录合并进已有媒体源：只登记为附加根，**不移动、不复制磁盘文件**。
+///
+/// 扫描时主根与附加根都会遍历；附加根下的条目记录绝对路径，因此播放不依赖主根。
+#[tauri::command]
+fn add_source_root(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> std::result::Result<Vec<String>, String> {
+    let path = normalize_local_root(&path);
+    if path.is_empty() {
+        return Err("请填写要合并的目录".into());
+    }
+    if !std::path::Path::new(&path).is_dir() {
+        return Err(format!("目录不存在：{path}"));
+    }
+    let source_id = SourceId::from(id);
+    let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+    let src = MediaSourceRepo::get(db.conn(), &source_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("媒体源不存在：{}", source_id.as_str()))?;
+
+    // 主根与附加根互相包含时，同一批文件会以两种稳定键各入一次库：直接拒绝
+    let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let main = norm(&src.location);
+    let extra = norm(&path);
+    if main == extra || main.starts_with(&format!("{extra}\\")) || extra.starts_with(&format!("{main}\\")) {
+        return Err("该目录与主目录相互包含，无需合并".into());
+    }
+
+    SourceRootRepo::add(db.conn(), &source_id, &path).map_err(|e| e.to_string())?;
+    SourceRootRepo::list(db.conn(), &source_id).map_err(|e| e.to_string())
+}
+
+/// 解除一个附加根的登记，并清除该目录下已入库的条目（只删库内记录，不动硬盘文件）。
+#[tauri::command]
+async fn remove_source_root(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> std::result::Result<usize, String> {
+    let db = Arc::clone(&state.db);
+    let source_id = SourceId::from(id);
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        let ids = SourceRootRepo::item_ids_under(db.conn(), &source_id, &path)
+            .map_err(|e| e.to_string())?;
+        let items: Vec<ItemId> = ids.iter().map(|id| ItemId::from(id.as_str())).collect();
+        let removed = MediaItemRepo::remove_many(db.conn(), &items).map_err(|e| e.to_string())?;
+        SourceRootRepo::remove(db.conn(), &source_id, &path).map_err(|e| e.to_string())?;
+        Ok(removed)
+    })
+    .await
+    .map_err(|e| format!("解除合并异常中止：{e}"))?
+}
+
+/// 把若干视频文件添加到已有媒体源（只登记，不移动文件）。
+#[tauri::command]
+async fn add_videos_to_source(
+    state: State<'_, AppState>,
+    id: String,
+    paths: Vec<String>,
+) -> std::result::Result<ImportReportView, String> {
+    let source_id = SourceId::from(id);
+    let src = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        MediaSourceRepo::get(db.conn(), &source_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("媒体源不存在：{}", source_id.as_str()))?
+    };
+    let files: Vec<std::path::PathBuf> = paths
+        .into_iter()
+        .map(|p| std::path::PathBuf::from(p))
+        .filter(|p| p.is_file())
+        .collect();
+    if files.is_empty() {
+        return Err("没有可添加的视频文件".into());
+    }
+
+    let cancel = Arc::clone(&state.scan_cancel);
+    cancel.store(false, Ordering::SeqCst);
+    let store = Arc::clone(&state.store);
+    let prober = state.prober.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let provider: Box<dyn MediaSourceProvider> = match prober.as_ref() {
+            Some(p) => Box::new(FileListProvider::with_prober(files, Arc::clone(p))),
+            None => Box::new(FileListProvider::new(files)),
+        };
+        let control = ScanControl {
+            reporter: None,
+            cancel: Some(cancel),
+        };
+        let report = ImportService::import_with(store.as_ref(), provider.as_ref(), &src, &control)
+            .map_err(|e| e.reason().to_string())?;
+        Ok::<ImportReportView, String>(ImportReportView {
+            discovered: report.stat.discovered,
+            stored: report.stored,
+            probed: report.probed,
+            skipped: report.stat.skipped,
+            cancelled: report.cancelled,
+        })
+    })
+    .await
+    .map_err(|e| format!("添加视频异常中止：{e}"))?
+}
+
+/// 全库删除一个标签取值：所有影片上的该标签一并移除，搜索索引同步重建。
+#[tauri::command]
+fn delete_dimension_tag(
+    state: State<'_, AppState>,
+    tag_id: String,
+) -> std::result::Result<usize, String> {
+    let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+    let affected = TagRepo::delete_value(db.conn(), &tag_id).map_err(|e| e.to_string())?;
+    for id in &affected {
+        SearchIndexRepo::reindex_item(db.conn(), &ItemId::from(id.as_str()))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(affected.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -1428,6 +2344,29 @@ fn place_screen_host(state: &AppState, slot: u32, fill: bool, rect: Option<(i32,
             host.set_on_click(move || {
                 let _ = app.emit("player-click", ());
             });
+            // 控制条自动隐藏后，指针落在原生画面上也要能唤醒：移动事件在 Rust 侧节流转发。
+            // 画面窗口在指针下方被撑开时系统会补发「位置没变」的 WM_MOUSEMOVE，
+            // 这类事件必须丢弃，否则控制条刚收起就被自己撑开的画面叫回来（画面会来回闪）。
+            let app_move = state.app.clone();
+            let last_move = std::sync::Arc::new(std::sync::Mutex::new((
+                None::<(i32, i32)>,
+                std::time::Instant::now() - std::time::Duration::from_millis(500),
+            )));
+            host.set_on_move(move |x, y| {
+                let now = std::time::Instant::now();
+                if let Ok(mut slot) = last_move.lock() {
+                    let (last_pos, last_at) = &mut *slot;
+                    if *last_pos == Some((x, y)) {
+                        return;
+                    }
+                    *last_pos = Some((x, y));
+                    if now.duration_since(*last_at) < std::time::Duration::from_millis(120) {
+                        return;
+                    }
+                    *last_at = now;
+                }
+                let _ = app_move.emit("player-move", ());
+            });
         } else {
             host.set_on_click(move || {
                 let _ = app.emit("multi-click", slot);
@@ -1471,6 +2410,8 @@ fn open_player(
     let stream = online_stream_path(&src, &ref_);
 
     // 先亮出画面宿主，再创建实例：mpv 需要拿到 `wid`
+    // 新开播放一律回到「仅留控制条」的布局，避免沿用上一场字幕面板让出的空间
+    state.player_extra_reserve.store(0, Ordering::Relaxed);
     place_screen_host(&state, 0, true, None)?;
 
     let start_at = start_ms.map(|ms| Progress {
@@ -1619,8 +2560,37 @@ fn seek(state: State<'_, AppState>, position_ms: i64) {
 
 #[tauri::command]
 fn close_player(state: State<'_, AppState>) -> std::result::Result<(), String> {
+    state.player_extra_reserve.store(0, Ordering::Relaxed);
     close_all_screens(&state);
     Ok(())
+}
+
+/// 单路播放时把画面底部再留出 `extra` 个物理像素。
+///
+/// 原生画面窗口恒压在 WebView 之上，字幕菜单 / 字幕弹层这些 HTML 控件若落在画面
+/// 区域内就会被盖住（点击反而落到画面上触发暂停）。打开面板时把画面向上收，
+/// 面板关闭后传 0 还原。控制条自动隐藏时传负值，让画面铺到窗口底部。
+#[tauri::command]
+fn set_player_reserve(state: State<'_, AppState>, extra: i32) {
+    // 正值 = 面板让位；负值最多收掉整条控制条（画面铺满）
+    let extra = extra.max(-CONTROL_BAR_PX);
+    state.player_extra_reserve.store(extra, Ordering::Relaxed);
+    if let Ok(hosts) = state.hosts.lock() {
+        if let Some(host) = hosts.screens.get(&0) {
+            host.fill_parent(state.parent, (CONTROL_BAR_PX + extra).max(0));
+        }
+    }
+}
+
+/// 当前画面的显示宽高比（宽 / 高）；供前端把字幕定位到**画面内**底部。
+///
+/// 宿主窗口与视频比例不一致时 mpv 会居中留黑边，字幕若贴在窗口底部就会落到黑边上。
+#[tauri::command]
+fn player_video_aspect(state: State<'_, AppState>, slot: Option<u32>) -> Option<f64> {
+    state
+        .factory
+        .screen(slot.unwrap_or(0))
+        .and_then(|core| core.video_aspect())
 }
 
 // ---------------------------------------------------------------------------
@@ -2012,44 +2982,14 @@ fn multi_exit(
 // 悬停预览（FR-02）
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-fn start_preview(
-    state: State<'_, AppState>,
-    item_id: String,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
+/// 悬停预览与预告片共用：放置预览宿主并启动一路预览实例。
+fn run_preview(
+    state: &AppState,
+    ref_: PlayableRef,
+    has_highlight: bool,
+    rect: (i32, i32, i32, i32),
 ) -> std::result::Result<PreviewResultView, String> {
-    let enabled = state
-        .playback
-        .lock()
-        .map_err(|_| "播放服务锁不可用".to_string())?
-        .preview_enabled();
-    if !enabled {
-        return Ok(PreviewResultView {
-            started: false,
-            reason: Some("已关闭悬停自动预览".into()),
-        });
-    }
-
-    let (item, src) = load_item(&state, &item_id)?;
-    // 在线源（边下边播）不提供悬停预览：预览要顺带把整部影片下载下来，代价远大于收益，
-    // 也会挤占正在播放的下载。悬停即拒绝，界面按既有方式标注原因。
-    if src.kind == SourceKind::OnlineSite {
-        return Ok(PreviewResultView {
-            started: false,
-            reason: Some("在线条目暂不提供悬停预览".into()),
-        });
-    }
-    let provider = provider_for(&src, state.prober.as_ref(), &state.downloads)
-        .map_err(|e| e.reason().to_string())?;
-    let ref_ = provider.open(&item).map_err(|e| e.reason().to_string())?;
-
-    // 「是否有精华片段」由时长是否已探明决定；起始位置判定在 PRD 中标为 TBD，
-    // 因此 M1 一律从片头开始（与 P-04 预览起点恒为 None 一致）。
-    let has_highlight = item.duration_ms.is_some();
-
+    let (x, y, width, height) = rect;
     {
         let mut hosts = state
             .hosts
@@ -2085,7 +3025,7 @@ fn start_preview(
             reason: None,
         }),
         Err(rejection) => {
-            stop_preview_inner(&state);
+            stop_preview_inner(state);
             Ok(PreviewResultView {
                 started: false,
                 reason: Some(rejection.message().to_string()),
@@ -2095,8 +3035,63 @@ fn start_preview(
 }
 
 #[tauri::command]
+fn start_preview(
+    state: State<'_, AppState>,
+    item_id: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> std::result::Result<PreviewResultView, String> {
+    let enabled = state
+        .playback
+        .lock()
+        .map_err(|_| "播放服务锁不可用".to_string())?
+        .preview_enabled();
+    if !enabled {
+        return Ok(PreviewResultView {
+            started: false,
+            reason: Some("已关闭悬停自动预览".into()),
+        });
+    }
+
+    let (item, src) = load_item(&state, &item_id)?;
+    // 本地预告片优先：抓取时已落盘的预告片比「精华片段」更贴近需求，
+    // 也与详情页的「播放预告片」保持同一份素材。
+    let ref_ = match trailer_path(&item) {
+        Some(path) => PlayableRef::local(path.to_string_lossy().to_string()),
+        None => {
+            // 在线源（边下边播）不提供悬停预览：预览要顺带把整部影片下载下来，
+            // 代价远大于收益，也会挤占正在播放的下载。
+            if src.kind == SourceKind::OnlineSite {
+                return Ok(PreviewResultView {
+                    started: false,
+                    reason: Some("在线条目暂不提供悬停预览".into()),
+                });
+            }
+            let provider = provider_for(&src, state.prober.as_ref(), &state.downloads)
+                .map_err(|e| e.reason().to_string())?;
+            provider.open(&item).map_err(|e| e.reason().to_string())?
+        }
+    };
+
+    // 「是否有精华片段」由时长是否已探明决定；起始位置判定在 PRD 中标为 TBD，
+    // 因此 M1 一律从片头开始（与 P-04 预览起点恒为 None 一致）。
+    let has_highlight = item.duration_ms.is_some();
+    run_preview(&state, ref_, has_highlight, (x, y, width, height))
+}
+
+#[tauri::command]
 fn stop_preview(state: State<'_, AppState>) {
     stop_preview_inner(&state);
+}
+
+/// 悬停预览的声音开关：预览实例默认静音，打开后即时解除。
+#[tauri::command]
+fn set_preview_sound(state: State<'_, AppState>, enabled: bool) {
+    if let Ok(mut svc) = state.playback.lock() {
+        svc.set_preview_muted(!enabled);
+    }
 }
 
 #[tauri::command]
@@ -2128,6 +3123,404 @@ fn library_stats(state: State<'_, AppState>) -> std::result::Result<LibraryStats
         items: MediaItemRepo::count(db.conn()).map_err(|e| e.to_string())?,
         decoder_ready: state.prober.is_some(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// 元数据刮削（P-06）：设置 / 单条刮削 / 批量补齐 / 详情 / 截图 / 预告片
+// ---------------------------------------------------------------------------
+
+/// 读取数据源设置并探测登录态（Cookie 为空时只回报「未登录」）。
+///
+/// 探测要访问站点，因此走 `spawn_blocking`：同步命令跑在主线程上会卡住界面。
+#[tauri::command]
+async fn javdb_settings(
+    state: State<'_, AppState>,
+) -> std::result::Result<JavdbSettingsView, String> {
+    let config = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        javdb_config_from(&db)
+    };
+    let client = Arc::clone(&state.javdb);
+    tauri::async_runtime::spawn_blocking(move || {
+        let login = client.login_state(&config);
+        let (logged_in, username, message) = match &login {
+            Ok(state) => (
+                state.logged_in,
+                state.username.clone(),
+                if state.logged_in {
+                    Some("Cookie 有效，评论与预告片可用".to_string())
+                } else if config.has_cookie() {
+                    Some("Cookie 已失效，请重新复制".to_string())
+                } else {
+                    Some("未填写 Cookie：可刮削标题/封面/截图/标签，评论与预告片需登录".to_string())
+                },
+            ),
+            Err(err) => (false, None, Some(err.reason().to_owned())),
+        };
+        let has_cookie = config.has_cookie();
+        JavdbSettingsView {
+            base_url: config.base_url,
+            has_cookie,
+            logged_in,
+            username,
+            message,
+        }
+    })
+    .await
+    .map_err(|e| format!("读取数据源设置失败：{e}"))
+}
+
+/// 保存数据源设置并立即验证 Cookie。
+#[tauri::command]
+async fn save_javdb_settings(
+    state: State<'_, AppState>,
+    base_url: String,
+    cookie: String,
+) -> std::result::Result<JavdbSettingsView, String> {
+    let base = normalize_base_url(&base_url);
+    if base.is_empty() {
+        return Err("请填写数据源站点地址".into());
+    }
+    // Cookie 头不能含换行：粘贴时常带折行，这里统一清掉
+    let cookie = cookie.replace(['\r', '\n'], "").trim().to_owned();
+    // 留空表示「保留已保存的 Cookie」：界面不回显 Cookie，避免误把旧值覆盖掉
+    let cookie = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        let effective = if cookie.is_empty() {
+            SettingRepo::get(db.conn(), KEY_JAVDB_COOKIE)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            cookie
+        };
+        SettingRepo::set(db.conn(), KEY_JAVDB_BASE_URL, &base).map_err(|e| e.to_string())?;
+        SettingRepo::set(db.conn(), KEY_JAVDB_COOKIE, &effective).map_err(|e| e.to_string())?;
+        effective
+    };
+
+    let config = JavdbConfig {
+        base_url: base.clone(),
+        cookie,
+    };
+    let client = Arc::clone(&state.javdb);
+    tauri::async_runtime::spawn_blocking(move || {
+        let login = client.login_state(&config);
+        let (logged_in, username, message) = match &login {
+            Ok(state) => (
+                state.logged_in,
+                state.username.clone(),
+                if state.logged_in {
+                    Some("Cookie 有效，评论与预告片可用".to_string())
+                } else if config.has_cookie() {
+                    Some("Cookie 已保存，但站点未识别到登录态，请检查是否复制完整".to_string())
+                } else {
+                    Some("已保存（未填写 Cookie）".to_string())
+                },
+            ),
+            Err(err) => (false, None, Some(err.reason().to_owned())),
+        };
+        let has_cookie = config.has_cookie();
+        JavdbSettingsView {
+            base_url: config.base_url,
+            has_cookie,
+            logged_in,
+            username,
+            message,
+        }
+    })
+    .await
+    .map_err(|e| format!("保存数据源设置失败：{e}"))
+}
+
+/// 刮削单个条目。`force = false` 时已完成的条目直接跳过。
+///
+/// 网络抓取与图片下载都走 `spawn_blocking`；同一时间只允许一条在途（自动与手动去重）。
+#[tauri::command]
+async fn scrape_item(
+    state: State<'_, AppState>,
+    item_id: String,
+    force: Option<bool>,
+) -> std::result::Result<ScrapeResultView, String> {
+    let config = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        javdb_config_from(&db)
+    };
+    let store = Arc::clone(&state.store);
+    let client = Arc::clone(&state.javdb);
+    let inflight = Arc::clone(&state.scraping);
+    let force = force.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = ItemId::from(item_id);
+        if !begin_scrape(&inflight, &id.0) {
+            return Err("该条目正在刮削中".to_string());
+        }
+        let outcome = MetadataService::new(client.as_ref(), store.as_ref())
+            .scrape_one(&id, &config, force);
+        end_scrape(&inflight, &id.0);
+        Ok(match outcome {
+            Ok(done) => ScrapeResultView {
+                item_id: done.item_id,
+                state: scrape_state_label(done.state).to_owned(),
+                comments: done.comments,
+                screenshots: done.screenshots,
+                trailer_saved: done.trailer_saved,
+                message: None,
+            },
+            Err(err) => ScrapeResultView {
+                item_id: id.0,
+                state: scrape_state_label(ScrapeState::Failed).to_owned(),
+                comments: 0,
+                screenshots: 0,
+                trailer_saved: false,
+                message: Some(err.reason().to_owned()),
+            },
+        })
+    })
+    .await
+    .map_err(|e| format!("刮削任务异常中止：{e}"))?
+}
+
+/// 批量补齐：刮削 `pending` / `failed` 的条目（可按源限定），逐条上报进度。
+#[tauri::command]
+async fn scrape_missing(
+    state: State<'_, AppState>,
+    source_id: Option<String>,
+) -> std::result::Result<usize, String> {
+    let config = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        javdb_config_from(&db)
+    };
+    let store = Arc::clone(&state.store);
+    let client = Arc::clone(&state.javdb);
+    let inflight = Arc::clone(&state.scraping);
+    let app = state.app.clone();
+    let scope = source_id.map(SourceId::from);
+    tauri::async_runtime::spawn_blocking(move || {
+        let ids = store
+            .pending_ids(scope.as_ref())
+            .map_err(|e| e.reason().to_owned())?;
+        let total = ids.len();
+        let mut done = 0usize;
+        for (idx, id) in ids.iter().enumerate() {
+            if begin_scrape(&inflight, &id.0) {
+                let _ = MetadataService::new(client.as_ref(), store.as_ref())
+                    .scrape_one(id, &config, false);
+                end_scrape(&inflight, &id.0);
+                done += 1;
+            }
+            let _ = app.emit(
+                "scrape-progress",
+                ScrapeProgressView {
+                    item_id: id.0.clone(),
+                    done: idx + 1,
+                    total,
+                },
+            );
+        }
+        Ok::<usize, String>(done)
+    })
+    .await
+    .map_err(|e| format!("批量刮削异常中止：{e}"))?
+}
+
+/// 条目详情：元数据 + 截图 + 十条高赞短评 + 五类标签。
+#[tauri::command]
+fn item_detail(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> std::result::Result<ItemDetailView, String> {
+    let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+    let id = ItemId::from(item_id);
+    let item = MediaItemRepo::get(db.conn(), &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("条目不存在：{}", id.0))?;
+    let shots = MetadataRepo::screenshots(db.conn(), &id).map_err(|e| e.to_string())?;
+    let comments = MetadataRepo::comments(db.conn(), &id).map_err(|e| e.to_string())?;
+    let tags = ItemTagRepo::of_item(db.conn(), &id).map_err(|e| e.to_string())?;
+    let group = |dimension: &str| tags.get(dimension).cloned().unwrap_or_default();
+
+    Ok(ItemDetailView {
+        id: item.id.0.clone(),
+        title: item.title.clone(),
+        code: item.external_code.clone(),
+        release_date: item.release_date.clone(),
+        duration_ms: item.duration_ms,
+        rating: item.rating,
+        detail_url: item.detail_url.clone(),
+        has_poster: item.poster_id.is_some(),
+        screenshots: shots.into_iter().map(|shot| shot.file_name).collect(),
+        comments: comments
+            .into_iter()
+            .map(|comment| CommentView {
+                author: comment.author,
+                score: comment.score,
+                content: comment.content,
+                likes: comment.likes,
+                posted_at: comment.posted_at,
+            })
+            .collect(),
+        categories: group(DIM_CATEGORY),
+        series: group(DIM_SERIES),
+        maker: group(DIM_MAKER),
+        director: group(DIM_DIRECTOR),
+        actors: group(DIM_ACTOR),
+        has_trailer: trailer_path(&item).is_some() || item.trailer_url.is_some(),
+        trailer_url: item.trailer_url.clone(),
+        scrape_state: scrape_state_label(item.scrape_state).to_owned(),
+        scrape_error: item.scrape_error.clone(),
+    })
+}
+
+/// 读一张刮削截图（`<数据目录>/shots/<file_name>`），返回 data URL。
+#[tauri::command]
+fn item_screenshot(
+    state: State<'_, AppState>,
+    item_id: String,
+    file_name: String,
+) -> std::result::Result<String, String> {
+    let _ = (state, item_id);
+    // 边界校验：文件名来自库内登记，不接受任何路径分隔
+    if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
+        return Ok(String::new());
+    }
+    let path = data_dir()?.join("shots").join(&file_name);
+    if !path.is_file() {
+        return Ok(String::new());
+    }
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(image_data_url(&bytes))
+}
+
+/// 从详情页地址取出 javdb 的 uid（`/v/<uid>`），用于播放前重新解析预告片。
+fn javdb_uid(detail_url: &str) -> Option<String> {
+    let idx = detail_url.rfind("/v/")?;
+    let uid = detail_url[idx + 3..]
+        .split(['?', '#', '/'])
+        .next()
+        .unwrap_or_default();
+    if uid.is_empty() {
+        None
+    } else {
+        Some(uid.to_string())
+    }
+}
+
+/// 播放条目预告片（详情页按钮与悬停预览共用同一路预览宿主）。
+///
+/// 手动点播**不受**「悬停预览开关」限制：临时打开开关，播完后恢复原值。
+/// 站点给的 HLS 地址带签名且约 30 分钟过期，直接复用库里存的地址会「点了没反应」，
+/// 因此播放前先按 uid 重新解析一次；解析失败再退回库内地址。
+#[tauri::command]
+async fn play_trailer(
+    state: State<'_, AppState>,
+    item_id: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> std::result::Result<PreviewResultView, String> {
+    let (item, _src) = load_item(&state, &item_id)?;
+    let config = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| "数据库锁不可用".to_string())?;
+        javdb_config_from(&db)
+    };
+    let mut headers = Vec::new();
+    if let Some(detail) = item.detail_url.as_ref() {
+        headers.push(("Referer".to_string(), detail.clone()));
+    }
+    if config.has_cookie() {
+        headers.push(("Cookie".to_string(), config.cookie.clone()));
+    }
+
+    let ref_ = match trailer_path(&item) {
+        Some(path) => PlayableRef::local(path.to_string_lossy().to_string()),
+        None => {
+            let client = state.javdb.clone();
+            let cfg = config.clone();
+            let uid = item.detail_url.as_deref().and_then(javdb_uid);
+            let fresh = match uid {
+                Some(uid) => tauri::async_runtime::spawn_blocking(move || {
+                    client.detail(&cfg, &uid).ok().and_then(|d| d.trailer)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+                .map(|t| t.url),
+                None => None,
+            };
+            match fresh.or_else(|| item.trailer_url.clone()) {
+                Some(url) => PlayableRef {
+                    location: url,
+                    headers,
+                },
+                None => {
+                    return Ok(PreviewResultView {
+                        started: false,
+                        reason: Some("该条目还没有预告片，请先在详情页点「从数据源更新」".into()),
+                    })
+                }
+            }
+        }
+    };
+
+    let was_enabled = state
+        .playback
+        .lock()
+        .map(|svc| svc.preview_enabled())
+        .unwrap_or(true);
+    if !was_enabled {
+        if let Ok(mut svc) = state.playback.lock() {
+            svc.set_preview_enabled(true);
+        }
+    }
+    let result = run_preview(&state, ref_, true, (x, y, width, height));
+    if let Ok(view) = &result {
+        if view.started {
+            // 手动预告片：画面可点击穿透到 HTML 层（点画面即关闭），并解除静音
+            if let Ok(hosts) = state.hosts.lock() {
+                if let Some(host) = &hosts.preview {
+                    host.set_click_through(true);
+                }
+            }
+            if let Ok(mut svc) = state.playback.lock() {
+                svc.unmute_preview();
+            }
+        }
+    }
+    if !was_enabled {
+        if let Ok(mut svc) = state.playback.lock() {
+            svc.set_preview_enabled(false);
+        }
+    }
+    result
+}
+
+/// 预告片心跳：读取预览实例的位置与时长（标题栏与进度条据此推进）。
+#[tauri::command]
+fn trailer_status(state: State<'_, AppState>) -> TrailerStatusView {
+    match state.factory.preview() {
+        Some(core) => TrailerStatusView {
+            active: true,
+            position_ms: core.position_ms().unwrap_or(0),
+            duration_ms: core.duration_ms(),
+        },
+        None => TrailerStatusView {
+            active: false,
+            position_ms: 0,
+            duration_ms: None,
+        },
+    }
+}
+
+/// 预告片跳转：预览实例与正式播放是不同实例，需单独下发命令。
+#[tauri::command]
+fn trailer_seek(state: State<'_, AppState>, position_ms: i64) {
+    if let Some(core) = state.factory.preview() {
+        core.command(PlayerCmd::Seek { position_ms });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2204,7 +3597,18 @@ fn main() {
                 covers_inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 // 与本次会话的扫描一一对应；`scan_source` 每次开跑都会先清零
                 scan_cancel: Arc::new(AtomicBool::new(false)),
+                javdb: Arc::new(JavdbProvider::new()),
+                scraping: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                player_extra_reserve: AtomicI32::new(0),
             });
+
+            // 【启动自愈】上次退出时仍在 `running` 的刮削已不可能完成，复位为 `pending`，
+            // 否则这些条目永远不会再被「补齐元数据」选中。
+            {
+                let state = app.state::<AppState>();
+                let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+                let _ = MediaItemRepo::reset_running_scrapes(db.conn());
+            }
 
             // 【启动自愈】在线源的封面是「懒抓」的：启动时检查一遍，
             // 只要某个在线源存在「已登记封面但本地文件缺失」的条目，就后台补抓一次。
@@ -2267,9 +3671,10 @@ fn main() {
                         .map(|svc| svc.screen_count() <= 1)
                         .unwrap_or(true);
                     if single {
+                        let extra = state.player_extra_reserve.load(Ordering::Relaxed);
                         if let Ok(hosts) = state.hosts.lock() {
                             if let Some(host) = hosts.screens.get(&0) {
-                                host.fill_parent(parent, CONTROL_BAR_PX);
+                                host.fill_parent(parent, (CONTROL_BAR_PX + extra).max(0));
                             }
                         }
                     }
@@ -2296,13 +3701,33 @@ fn main() {
             set_paused,
             seek,
             close_player,
+            set_player_reserve,
+            player_video_aspect,
             remove_items,
             clear_source,
+            add_source_root,
+            remove_source_root,
+            add_videos_to_source,
+            delete_dimension_tag,
             start_preview,
             stop_preview,
+            set_preview_sound,
             set_preview_enabled,
+            set_console_fullscreen,
             ui_constants,
             library_stats,
+            javdb_settings,
+            save_javdb_settings,
+            llm_settings,
+            save_llm_settings,
+            recommend_highlights,
+            scrape_item,
+            scrape_missing,
+            item_detail,
+            item_screenshot,
+            play_trailer,
+            trailer_status,
+            trailer_seek,
             multi_layouts,
             multi_status,
             multi_set_layout,
@@ -2328,6 +3753,8 @@ fn main() {
             subtitle::subtitle_save,
             subtitle::subtitle_close,
             subtitle::subtitle_add_external,
+            subtitle::subtitle_online_search,
+            subtitle::subtitle_online_load,
             subtitle::subtitle_tracks,
             subtitle::subtitle_entry_visible
         ])

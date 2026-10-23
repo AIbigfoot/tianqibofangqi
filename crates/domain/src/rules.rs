@@ -129,7 +129,7 @@ impl AudioFocus {
 
 /// 多屏布局（PRD FR-06「布局」表）。
 ///
-/// 2 × 3 六路在 PRD 中标为 P1，因此不纳入 [`Layout::ALL`]，也不作为默认上限；
+/// 2 × 3 六路不在布局表内（由 3 × 3 九宫格覆盖 9 路需求）；
 /// 同时播放上限默认仍为 4 路（由 L1 的解码额度给出）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Layout {
@@ -142,15 +142,18 @@ pub enum Layout {
     TwoByTwo,
     /// 左侧主画面更大，右侧三路小窗。
     OnePlusThree,
+    /// 九宫格，最多同时 9 路。
+    ThreeByThree,
 }
 
 impl Layout {
-    /// 本阶段可用布局，顺序与 PRD 表格一致（2 × 3 为 P1，未纳入）。
-    pub const ALL: [Layout; 4] = [
+    /// 本阶段可用布局，顺序与 PRD 表格一致。
+    pub const ALL: [Layout; 5] = [
         Layout::OneByTwo,
         Layout::TwoByOne,
         Layout::TwoByTwo,
         Layout::OnePlusThree,
+        Layout::ThreeByThree,
     ];
 
     /// 格位数。多屏路数上限由设备能力决定（L1 的额度），布局只决定格位数。
@@ -158,6 +161,7 @@ impl Layout {
         match self {
             Layout::OneByTwo | Layout::TwoByOne => 2,
             Layout::TwoByTwo | Layout::OnePlusThree => 4,
+            Layout::ThreeByThree => 9,
         }
     }
 
@@ -168,6 +172,7 @@ impl Layout {
             Layout::TwoByOne => "2x1",
             Layout::TwoByTwo => "2x2",
             Layout::OnePlusThree => "1plus3",
+            Layout::ThreeByThree => "3x3",
         }
     }
 
@@ -177,6 +182,7 @@ impl Layout {
             "2x1" => Layout::TwoByOne,
             "2x2" => Layout::TwoByTwo,
             "1plus3" => Layout::OnePlusThree,
+            "3x3" => Layout::ThreeByThree,
             _ => Layout::OneByTwo,
         }
     }
@@ -188,6 +194,7 @@ impl Layout {
             Layout::TwoByOne => "2 × 1",
             Layout::TwoByTwo => "2 × 2",
             Layout::OnePlusThree => "1 + 3",
+            Layout::ThreeByThree => "3 × 3",
         }
     }
 }
@@ -415,6 +422,8 @@ pub enum SortMode {
     Duration,
     /// 最近观看（近→远）。
     LastWatched,
+    /// 随机打乱（每次查询重新洗牌，由检索服务处理，不走比较器）。
+    Random,
 }
 
 impl SortMode {
@@ -426,6 +435,7 @@ impl SortMode {
             "rating" => SortMode::Rating,
             "duration" => SortMode::Duration,
             "last_watched" => SortMode::LastWatched,
+            "random" => SortMode::Random,
             _ => SortMode::RecentAdded,
         }
     }
@@ -456,6 +466,8 @@ pub fn compare_items(mode: SortMode, a: &SortKey, b: &SortKey) -> Ordering {
         ),
         SortMode::Duration => asc_none_last(a.duration_ms, b.duration_ms),
         SortMode::LastWatched => desc_none_last(a.last_watched_at, b.last_watched_at),
+        // 随机模式在检索服务里直接洗牌，比较器只作稳定兜底
+        SortMode::Random => Ordering::Equal,
     };
     primary.then_with(|| a.title.cmp(&b.title))
 }

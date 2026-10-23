@@ -54,6 +54,11 @@ pub struct LocalFolderProvider {
     root: PathBuf,
     /// 时长探测器。未配置时 `probe` 返回空事实，不阻塞入库（M0 的降级形态）。
     prober: Option<Arc<MpvProber>>,
+    /// 是否把绝对路径写进 `rel_path`。
+    ///
+    /// 「合并目录」把另一个目录登记为同一媒体源的附加根：条目必须记绝对路径，
+    /// 否则播放时会按主根拼回错误位置。主根扫描仍记相对路径（整棵树搬家不重复入库）。
+    absolute_paths: bool,
 }
 
 impl LocalFolderProvider {
@@ -62,6 +67,7 @@ impl LocalFolderProvider {
         Self {
             root: PathBuf::from(normalize_local_root(&root.to_string_lossy())),
             prober: None,
+            absolute_paths: false,
         }
     }
 
@@ -72,6 +78,25 @@ impl LocalFolderProvider {
         Self {
             root: PathBuf::from(normalize_local_root(&root.to_string_lossy())),
             prober: Some(prober),
+            absolute_paths: false,
+        }
+    }
+
+    /// 合并目录用：根目录仍是附加目录，但条目记录绝对路径。
+    pub fn with_prober_absolute(root: &Path, prober: Arc<MpvProber>) -> Self {
+        Self {
+            root: PathBuf::from(normalize_local_root(&root.to_string_lossy())),
+            prober: Some(prober),
+            absolute_paths: true,
+        }
+    }
+
+    /// 合并目录用（不探测时长）：条目记录绝对路径。
+    pub fn new_absolute(root: &Path) -> Self {
+        Self {
+            root: PathBuf::from(normalize_local_root(&root.to_string_lossy())),
+            prober: None,
+            absolute_paths: true,
         }
     }
 
@@ -89,7 +114,7 @@ impl MediaSourceProvider for LocalFolderProvider {
     fn discover(&self, src: &MediaSource, sink: &dyn DiscoverSink) -> Result<DiscoverStat> {
         // 用提供者自己的根（而非 `src.location`）：`open` 也用它拼回绝对路径，
         // 两者必须是同一份归一化结果，否则「扫出来的」与「放得出来的」会指向不同目录
-        discover_video_tree(&self.root, src, sink)
+        discover_video_tree(&self.root, src, sink, self.absolute_paths)
     }
 
     fn open(&self, item: &MediaItem) -> Result<PlayableRef> {
@@ -213,7 +238,7 @@ impl MediaSourceProvider for LanPathProvider {
             // 空路径无法扫描，显式失败好过静默给出空结果
             return Err(PortError::NotFound("局域网路径为空".into()));
         }
-        discover_video_tree(&self.root, src, sink)
+        discover_video_tree(&self.root, src, sink, false)
     }
 
     fn open(&self, item: &MediaItem) -> Result<PlayableRef> {
@@ -229,6 +254,81 @@ impl MediaSourceProvider for LanPathProvider {
         Ok(PlayableRef::local(
             self.root.join(rel).to_string_lossy().to_string(),
         ))
+    }
+
+    fn probe(&self, ref_: &PlayableRef) -> Result<StreamFacts> {
+        match self.prober.as_ref() {
+            Some(prober) => prober.probe(&ref_.location),
+            None => Ok(StreamFacts::default()),
+        }
+    }
+}
+
+/// 一组指定视频文件：把用户逐个选中的文件登记到同一个媒体源。
+///
+/// 与「合并目录」同理，条目记录**绝对路径**，因此不依赖源根目录就能播放。
+#[derive(Debug, Clone, Default)]
+pub struct FileListProvider {
+    files: Vec<PathBuf>,
+    prober: Option<Arc<MpvProber>>,
+}
+
+impl FileListProvider {
+    pub fn new(files: Vec<PathBuf>) -> Self {
+        Self {
+            files,
+            prober: None,
+        }
+    }
+
+    pub fn with_prober(files: Vec<PathBuf>, prober: Arc<MpvProber>) -> Self {
+        Self {
+            files,
+            prober: Some(prober),
+        }
+    }
+}
+
+impl MediaSourceProvider for FileListProvider {
+    fn kind(&self) -> SourceKind {
+        SourceKind::LocalFolder
+    }
+
+    fn discover(&self, src: &MediaSource, sink: &dyn DiscoverSink) -> Result<DiscoverStat> {
+        let mut stat = DiscoverStat::default();
+        for path in &self.files {
+            if sink.is_cancelled() {
+                stat.cancelled = true;
+                break;
+            }
+            if !path.is_file() || !is_video(path) {
+                stat.skipped += 1;
+                continue;
+            }
+            let absolute = path.to_string_lossy().replace('\\', "/");
+            let candidate = DiscoveredItem {
+                stable_key: format!("{}|{}", src.id, absolute),
+                rel_path: Some(absolute),
+                url: None,
+                title_hint: path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_owned),
+                poster_ref: None,
+            };
+            if sink.submit(candidate).is_ok() {
+                stat.discovered += 1;
+            }
+        }
+        Ok(stat)
+    }
+
+    fn open(&self, item: &MediaItem) -> Result<PlayableRef> {
+        let rel = item
+            .rel_path
+            .as_ref()
+            .ok_or_else(|| PortError::NotFound(format!("条目 {} 缺少本地路径", item.id)))?;
+        Ok(PlayableRef::local(rel.clone()))
     }
 
     fn probe(&self, ref_: &PlayableRef) -> Result<StreamFacts> {
@@ -284,6 +384,7 @@ fn discover_video_tree(
     root: &Path,
     src: &MediaSource,
     sink: &dyn DiscoverSink,
+    absolute_paths: bool,
 ) -> Result<DiscoverStat> {
     if !root.is_dir() {
         return Err(PortError::NotFound(format!("目录不存在: {}", root.display())));
@@ -338,7 +439,11 @@ fn discover_video_tree(
                 }
                 continue;
             }
-            let rel = rel_path(&path, root);
+            let rel = if absolute_paths {
+                path.to_string_lossy().replace('\\', "/")
+            } else {
+                rel_path(&path, root)
+            };
             let title_hint = path
                 .file_stem()
                 .and_then(|s| s.to_str())
