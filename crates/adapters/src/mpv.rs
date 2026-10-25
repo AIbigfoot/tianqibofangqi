@@ -597,6 +597,21 @@ pub(crate) fn observe_playback_properties(inst: &MpvInstance) -> Result<()> {
     Ok(())
 }
 
+/// 键盘完全交给前端：写一份只把方向键绑成空操作的 `input.conf`。
+///
+/// `input-default-bindings=no` 在部分内嵌（`wid`）场景下仍可能被 VO 键盘输入绕过，
+/// 这里显式兜底，确保上/下键永远不会变成 mpv 自带的 `seek ±60`（现场正是这样被抢走的）。
+fn arrow_input_conf() -> Option<PathBuf> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!("cinema-input-{}.conf", std::process::id()));
+        let content = "UP ignore\nDOWN ignore\nLEFT ignore\nRIGHT ignore\n";
+        std::fs::write(&path, content).ok()?;
+        Some(path)
+    })
+    .clone()
+}
+
 /// 供 [`crate::player`] 复用的加载选项集合。
 pub(crate) fn apply_common_options(inst: &MpvInstance, render: Option<i64>) -> Result<()> {
     // 必需项：读用户配置 / 保持实例存活
@@ -622,8 +637,19 @@ pub(crate) fn apply_common_options(inst: &MpvInstance, render: Option<i64>) -> R
         ("input-default-bindings", "no"),
         ("input-vo-keyboard", "no"),
         ("msg-level", "all=no"),
+        // 音频输出跟随设备能力：设备支持多声道就用环绕（解码后的 Dolby / DTS
+        // 音轨按原声道数输出），只支持立体声时才降混。mpv 默认的 `auto` 在部分
+        // Windows 声卡上会锁成 2.0，显式设成 `auto-safe` 才能拿到 5.1 / 7.1。
+        ("audio-channels", "auto-safe"),
+        // 多音轨文件优先选带中文标识的轨道（站点片源常见「日语 2.0 + 评论音轨」）
+        ("alang", "zh,chi,chs,jpn,ja,eng,en"),
     ] {
         let _ = inst.set_option(name, value);
+    }
+
+    // 方向键兜底：即使 mpv 拿到了焦点，也不会自己快进 / 快退
+    if let Some(conf) = arrow_input_conf() {
+        let _ = inst.set_option("input-conf", &conf.to_string_lossy());
     }
     Ok(())
 }

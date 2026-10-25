@@ -7,10 +7,11 @@
 //! 之所以不用 `wid = 主窗口本身`：那样 mpv 的窗口会盖住整个客户区，
 //! 海报墙与顶栏都无法再交互。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use cinema_domain::error::{PortError, Result};
 
@@ -29,7 +30,10 @@ const SWP_SHOWWINDOW: u32 = 0x0040;
 const BLACK_BRUSH: i32 = 4;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_KEYDOWN: u32 = 0x0100;
 const GWL_EXSTYLE: i32 = -20;
+const GWL_WNDPROC: i32 = -4;
+const GW_CHILD: u32 = 5;
 const WS_EX_TRANSPARENT: u32 = 0x0000_0020;
 
 /// 供 `wnd_proc` 查表用的点击回调，按窗口句柄索引。
@@ -50,6 +54,87 @@ fn move_registry() -> &'static Mutex<HashMap<isize, Arc<dyn Fn(i32, i32) + Send 
     static REGISTRY: OnceLock<Mutex<HashMap<isize, Arc<dyn Fn(i32, i32) + Send + Sync>>>> =
         OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 键盘回调：画面窗口压住页面并可能抢到焦点，方向键必须在原生窗口里截获后转发给前端，
+/// 否则按键会被 mpv 或系统默认处理吞掉（表现为上/下键变成快进快退）。
+fn key_registry() -> &'static Mutex<HashMap<isize, Arc<dyn Fn(i32) + Send + Sync>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<isize, Arc<dyn Fn(i32) + Send + Sync>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// mpv 自己在宿主窗口内建的渲染子窗口：鼠标点上去会把**焦点**给这个子窗口，
+/// 之后键盘事件全落在它身上，宿主窗口的 `WM_KEYDOWN` 根本收不到。
+/// 这里保存「子窗口 → (宿主句柄, 原窗口过程)」，用于把键盘重新接回前端。
+fn child_registry() -> &'static Mutex<HashMap<isize, (isize, isize)>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<isize, (isize, isize)>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 已启动监视线程的宿主窗口，避免重复起线程。
+fn watched_hosts() -> &'static Mutex<HashSet<isize>> {
+    static WATCHED: OnceLock<Mutex<HashSet<isize>>> = OnceLock::new();
+    WATCHED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 把键盘事件转给键盘回调；方向键不再往下传（否则 mpv 会执行自带的 seek ±60）。
+fn dispatch_key(hwnd: isize, vk: i32) -> bool {
+    let handler = key_registry()
+        .lock()
+        .ok()
+        .and_then(|registry| registry.get(&hwnd).cloned());
+    let Some(handler) = handler else {
+        return false;
+    };
+    handler(vk);
+    (0x25..=0x28).contains(&vk)
+}
+
+/// mpv 渲染子窗口的窗口过程：接管键盘，其余消息原样转给 mpv。
+unsafe extern "system" fn child_wnd_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -> isize {
+    let entry = child_registry()
+        .lock()
+        .ok()
+        .and_then(|registry| registry.get(&(hwnd as isize)).copied());
+    let Some((host, original)) = entry else {
+        return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
+    };
+    if msg == WM_KEYDOWN {
+        dispatch_key(host, wp as i32);
+        // 整个键盘都归前端：mpv 不再处理任何按键，方向键更不会被当成快进快退
+        return 0;
+    }
+    // 原窗口过程按函数指针保存，取回后直接调用（参数表与窗口过程一致）
+    let prev: unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize =
+        unsafe { std::mem::transmute(original) };
+    unsafe { prev(hwnd, msg, wp, lp) }
+}
+
+/// mpv 的渲染子窗口是**首次加载文件后**才创建的，所以要持续观察宿主窗口，
+/// 发现子窗口出现（或重建）就立刻把窗口过程换掉。
+fn watch_mpv_child(host: Hwnd) {
+    let key = host as isize;
+    let started = watched_hosts()
+        .lock()
+        .map(|mut set| set.insert(key))
+        .unwrap_or(false);
+    if !started {
+        return;
+    }
+    std::thread::spawn(move || {
+        while unsafe { IsWindow(key as Hwnd) } != 0 {
+            let child = unsafe { GetWindow(key as Hwnd, GW_CHILD) };
+            if !child.is_null() && !child_registry().lock().map(|m| m.contains_key(&(child as isize))).unwrap_or(false) {
+                let original = unsafe { SetWindowLongPtrW(child, GWL_WNDPROC, child_wnd_proc as *const () as isize) };
+                if original != 0 {
+                    if let Ok(mut registry) = child_registry().lock() {
+                        registry.insert(child as isize, (key, original));
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
+    });
 }
 
 #[repr(C)]
@@ -114,6 +199,9 @@ extern "system" {
     fn GetStockObject(index: i32) -> Hgdiobj;
     fn GetWindowLongW(hwnd: Hwnd, index: i32) -> i32;
     fn SetWindowLongW(hwnd: Hwnd, index: i32, value: i32) -> i32;
+    fn GetWindow(hwnd: Hwnd, cmd: u32) -> Hwnd;
+    fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize;
+    fn IsWindow(hwnd: Hwnd) -> i32;
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -157,9 +245,14 @@ fn ensure_class() -> Result<()> {
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: u32, wp: usize, lp: isize) -> isize {
-    // 本窗口只给 mpv 当画布，不接收键盘；但**左键抬起**要转发出去，
-    // 否则鼠标落在影片画面上时页面拿不到点击（预览开启后尤其明显）。
-    if msg == WM_LBUTTONUP {
+    // 本窗口只给 mpv 当画布；但**左键抬起**与**方向键**要转发出去，
+    // 否则鼠标落在影片画面上时页面拿不到点击，方向键也会被原生窗口吞掉。
+    if msg == WM_KEYDOWN {
+        // 方向键由前端统一处理（快进 / 快退 / 音量），原生窗口不再往下传
+        if dispatch_key(hwnd as isize, wp as i32) {
+            return 0;
+        }
+    } else if msg == WM_LBUTTONUP {
         let key = hwnd as isize;
         let handler = click_registry()
             .lock()
@@ -303,6 +396,20 @@ impl HostWindow {
             registry.insert(self.hwnd as isize, Arc::new(handler));
         }
     }
+
+    /// 注册键盘回调（虚拟键码）。画面窗口压在 webview 之上，焦点可能在它身上，
+    /// 方向键必须在这里截获再转发给页面。
+    pub fn set_on_key<F>(&self, handler: F)
+    where
+        F: Fn(i32) + Send + Sync + 'static,
+    {
+        if let Ok(mut registry) = key_registry().lock() {
+            registry.insert(self.hwnd as isize, Arc::new(handler));
+        }
+        // 真正吃掉按键的是 mpv 自己建的渲染子窗口（点一下画面焦点就归它），
+        // 所以还要盯住宿主窗口，把这个子窗口的窗口过程换成我们的转发器。
+        watch_mpv_child(self.hwnd);
+    }
 }
 
 impl std::fmt::Debug for HostWindow {
@@ -324,6 +431,16 @@ impl Drop for HostWindow {
             }
             if let Ok(mut registry) = move_registry().lock() {
                 registry.remove(&(self.hwnd as isize));
+            }
+            if let Ok(mut registry) = key_registry().lock() {
+                registry.remove(&(self.hwnd as isize));
+            }
+            if let Ok(mut registry) = child_registry().lock() {
+                let host = self.hwnd as isize;
+                registry.retain(|_, (owner, _)| *owner != host);
+            }
+            if let Ok(mut watched) = watched_hosts().lock() {
+                watched.remove(&(self.hwnd as isize));
             }
             unsafe {
                 DestroyWindow(self.hwnd);

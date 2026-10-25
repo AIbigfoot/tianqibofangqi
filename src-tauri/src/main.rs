@@ -16,22 +16,27 @@ mod subtitle;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use cinema_adapters::enrichment::{self, Enrichment};
 use cinema_adapters::javdb::JavdbProvider;
 use cinema_adapters::llm::{local_highlight, summarize_highlights, HighlightInput, LlmConfig};
 use cinema_adapters::websearch::search_snippets;
 use cinema_adapters::media_source::{
-    normalize_local_root, DirectUrlProvider, FileListProvider, LanPathProvider, LocalFolderProvider,
+    normalize_local_root, normalized_lan_root, DirectUrlProvider, FileListProvider, LanPathProvider,
+    LocalFolderProvider,
 };
 use cinema_adapters::mpv::MpvProber;
-use cinema_adapters::online_site::{DownloadRegistry, DownloadState, OnlineSiteProvider};
+use cinema_adapters::thumbs;
+use cinema_adapters::online_site::{
+    DownloadRegistry, DownloadState, OnlineDetail, OnlineSiteProvider,
+};
 use cinema_adapters::player::MpvPlayerCore;
 use cinema_app::decode_quota::DecodeQuota;
-use cinema_app::import_service::{ImportService, ScanControl, ScanReporter};
+use cinema_app::import_service::{ImportService, ImportStore, ScanControl, ScanReporter};
 use cinema_app::metadata_service::{MetadataService, MetadataStore};
 use cinema_app::playback_service::{PlaybackService, PreviewRequest};
 use cinema_app::portability_service::PortabilityService;
@@ -39,9 +44,9 @@ use cinema_app::progress_service::ProgressService;
 use cinema_app::search_service::{SearchQuery, SearchService, SearchStore};
 use cinema_domain::error::{PortError, Result as PortResult};
 use cinema_domain::model::{
-    ItemId, MediaItem, MediaSource, PlayableRef, PlayerCmd, PlayerEvent, Progress, ScrapedComment,
-    ScrapeState, ScanProgress, ScanStage, SourceId, SourceKind, SourceState, StreamFacts,
-    TrackSelection,
+    IdentifyState, ItemId, MediaItem, MediaSource, MetaState, PlayableRef, PlayerCmd, PlayerEvent,
+    Progress, ScrapedComment, ScrapedImage, ScrapeState, ScanProgress, ScanStage, SourceId,
+    SourceKind, SourceState, StreamFacts, TrackSelection,
 };
 use cinema_domain::ports::javdb::{JavdbClient, JavdbConfig};
 use cinema_domain::ports::media_source::MediaSourceProvider;
@@ -51,8 +56,11 @@ use cinema_domain::rules::{
     preview_allowed, ExitPolicy, Layout, ResumePolicy, SortMode, PREVIEW_SEGMENT_MS,
     PREVIEW_TRIGGER_MS,
 };
-use cinema_domain::tagging::{DIM_ACTOR, DIM_CATEGORY, DIM_DIRECTOR, DIM_MAKER, DIM_SERIES};
+use cinema_domain::tagging::{
+    year_label_from, DIM_ACTOR, DIM_CATEGORY, DIM_DIRECTOR, DIM_MAKER, DIM_SERIES, DIM_YEAR,
+};
 use cinema_infra::db::Database;
+use cinema_infra::now_ms;
 use cinema_infra::repo::{
     CachedHighlight, CommentedItem, MediaItemRepo, MediaSourceRepo, MetadataRepo, SourceRootRepo,
 };
@@ -149,6 +157,8 @@ struct AppState {
     downloads: Arc<DownloadRegistry>,
     /// 正在后台抓列表页封面的在线源（源 id → 开始时间），避免同一源被反复抓取。
     covers_inflight: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// 联网视频下载任务（条目 id → 进度快照），跨命令存活供界面查询与续看。
+    online_downloads: Arc<Mutex<std::collections::HashMap<String, OnlineDownloadView>>>,
     /// 当前扫描的取消位。界面点「取消」置位，扫描就地收尾（见 `cancel_scan`）。
     scan_cancel: Arc<AtomicBool>,
     /// 元数据数据源客户端（HTTP 抓取与解析）。
@@ -170,6 +180,8 @@ struct SourceView {
     id: String,
     name: String,
     location: String,
+    /// `local_folder` | `lan_path` | `direct_url` | `online_site`。
+    kind: String,
     state: String,
     /// 该源当前入库的条目数（「库管理」据此展示清除的影响面）。
     item_count: u64,
@@ -177,6 +189,33 @@ struct SourceView {
     last_error: Option<String>,
     /// 合并进来的附加目录（只登记，不移动文件）。
     extra_roots: Vec<String>,
+}
+
+/// 源类型的界面标识（前端据此只对在线源展示「下载视频」）。
+fn source_kind_label(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::LocalFolder => "local_folder",
+        SourceKind::LanPath => "lan_path",
+        SourceKind::DirectUrl => "direct_url",
+        SourceKind::CloudDrive => "cloud_drive",
+        SourceKind::OnlineSite => "online_site",
+    }
+}
+
+/// 一条联网视频下载任务（进度事件与查询命令共用）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct OnlineDownloadView {
+    item_id: String,
+    title: String,
+    /// `running` | `done` | `failed` | `skipped`（磁盘上已有同名视频）。
+    state: String,
+    /// 0–100；已完成时恒为 100。
+    percent: f64,
+    /// 落盘路径（已完成时给出）。
+    dest: Option<String>,
+    /// 失败原因。
+    error: Option<String>,
 }
 
 /// 导出 / 导入的回执（PRD FR-07）。
@@ -277,6 +316,10 @@ struct ItemDetailView {
     actors: Vec<String>,
     has_trailer: bool,
     trailer_url: Option<String>,
+    /// 该条目属于在线站点源（界面据此显示「下载视频」）。
+    online: bool,
+    /// 视频文件已经在下载目录里：详情页不再显示下载入口。
+    downloaded: bool,
     /// `pending` | `running` | `done` | `failed` | `no_code`。
     scrape_state: String,
     scrape_error: Option<String>,
@@ -557,20 +600,433 @@ fn dir_label(path: &str) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
-fn data_dir() -> std::result::Result<PathBuf, String> {
-    if let Ok(dir) = std::env::var("CINEMA_DATA_DIR") {
-        if !dir.trim().is_empty() {
-            let path = PathBuf::from(dir);
-            std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+/// 默认元数据目录（`%LOCALAPPDATA%\Cinema`）：数据库、封面、截图与预告片。
+fn default_data_dir() -> PathBuf {
+    std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("Cinema")
+}
+
+/// 默认视频下载目录（默认元数据目录下的 `streams`，与旧版本落盘位置一致）。
+///
+/// 视频文件与视频信息分开存放：这里只放联网播放 / 下载的视频。
+fn default_download_dir() -> PathBuf {
+    default_data_dir().join("streams")
+}
+
+/// 目录字符串归一化（去首尾空白，空串视为未设置）。
+fn normalize_dir(raw: &str) -> Option<String> {
+    let dir = raw.trim();
+    (!dir.is_empty()).then(|| dir.to_owned())
+}
+
+/// 判断两个目录是否指向同一位置（Windows 下大小写与斜杠写法不同也算同一个）。
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// 环境变量指定的元数据目录（`CINEMA_DATA_DIR`），优先级最高。
+fn env_data_dir() -> Option<String> {
+    std::env::var("CINEMA_DATA_DIR")
+        .ok()
+        .and_then(|dir| normalize_dir(&dir))
+}
+
+/// 环境变量指定的视频下载目录（`CINEMA_DOWNLOAD_DIR`），优先级最高。
+fn env_download_dir() -> Option<String> {
+    std::env::var("CINEMA_DOWNLOAD_DIR")
+        .ok()
+        .and_then(|dir| normalize_dir(&dir))
+}
+
+/// 设置文件路径：固定放在默认目录下，不随数据目录迁移。
+///
+/// 否则换了目录就再也读不到自己选过哪里。数据目录搬家后，旧目录里只会留下这份很小的设置文件。
+fn storage_config_path() -> PathBuf {
+    default_data_dir().join("storage.json")
+}
+
+/// 设置文件版本：旧版本只记 `dataDir`，升级后按其目标补一次自动迁移。
+const STORAGE_CONFIG_VERSION: u32 = 2;
+
+/// `storage.json` 的内容：元数据目录与视频下载目录分开记录。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageConfig {
+    /// 配置版本。
+    #[serde(default)]
+    version: u32,
+    /// 元数据目录（数据库、封面、截图、预告片）。兼容旧版本字段 `dataDir`。
+    #[serde(default, alias = "dataDir")]
+    metadata_dir: Option<String>,
+    /// 联网视频的默认下载目录。
+    #[serde(default)]
+    download_dir: Option<String>,
+    /// 尚未完成的迁移来源：启动时把该目录的元数据搬到目标目录，成功后清空。
+    #[serde(default)]
+    migrate_from: Option<String>,
+}
+
+fn read_storage_config() -> StorageConfig {
+    std::fs::read_to_string(storage_config_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_storage_config(config: &StorageConfig) -> std::result::Result<(), String> {
+    let path = storage_config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    std::fs::write(&path, raw).map_err(|e| e.to_string())
+}
+
+/// 本次运行实际生效的目录：启动时解析一次并固定，改设置后靠重启生效。
+///
+/// 固定下来还避免「已保存但尚未重启」时海报目录已经指向新位置、数据库却还在旧位置。
+static ACTIVE_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+static ACTIVE_DOWNLOAD_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+fn ensure_dir(path: &Path, label: &str) -> std::result::Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|e| format!("{label}不可用：{e}"))
+}
+
+/// 落盘前探测目标目录可写（只读盘 / 权限不足当场报错，而不是重启后启动失败）。
+fn write_probe(path: &Path) -> std::result::Result<(), String> {
+    let probe = path.join(".cinema-write-test");
+    std::fs::write(&probe, b"ok").map_err(|e| format!("目标目录不可写：{e}"))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// 按「环境变量 > 设置文件 > 默认」解析元数据目录（不做迁移）。
+///
+/// 设置文件里记录的目录若不可用（盘符拔掉、权限丢失），回退默认目录而不是启动失败。
+fn resolve_data_dir() -> std::result::Result<PathBuf, String> {
+    if let Some(dir) = env_data_dir() {
+        let path = PathBuf::from(dir);
+        ensure_dir(&path, "CINEMA_DATA_DIR 指向的目录")?;
+        return Ok(path);
+    }
+    if let Some(dir) = read_storage_config()
+        .metadata_dir
+        .and_then(|dir| normalize_dir(&dir))
+    {
+        let path = PathBuf::from(&dir);
+        if ensure_dir(&path, "设置的数据目录").is_ok() {
             return Ok(path);
         }
+        eprintln!("[存储] 设置的数据目录不可用，回退默认目录：{dir}");
     }
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let path = base.join("Cinema");
-    std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    let path = default_data_dir();
+    ensure_dir(&path, "默认数据目录")?;
     Ok(path)
+}
+
+/// 按「环境变量 > 设置文件 > 默认」解析视频下载目录。
+fn resolve_download_dir() -> std::result::Result<PathBuf, String> {
+    if let Some(dir) = env_download_dir() {
+        let path = PathBuf::from(dir);
+        ensure_dir(&path, "CINEMA_DOWNLOAD_DIR 指向的目录")?;
+        return Ok(path);
+    }
+    if let Some(dir) = read_storage_config()
+        .download_dir
+        .and_then(|dir| normalize_dir(&dir))
+    {
+        let path = PathBuf::from(&dir);
+        if ensure_dir(&path, "设置的下载目录").is_ok() {
+            return Ok(path);
+        }
+        eprintln!("[存储] 设置的下载目录不可用，回退默认目录：{dir}");
+    }
+    let path = default_download_dir();
+    ensure_dir(&path, "默认下载目录")?;
+    Ok(path)
+}
+
+/// 生效的元数据目录：启动时固定，未初始化时才回落到动态解析。
+fn data_dir() -> std::result::Result<PathBuf, String> {
+    match ACTIVE_DATA_DIR.get() {
+        Some(dir) => Ok(dir.clone()),
+        None => resolve_data_dir(),
+    }
+}
+
+/// 生效的视频下载目录：启动时固定，未初始化时才回落到动态解析。
+fn download_dir() -> std::result::Result<PathBuf, String> {
+    match ACTIVE_DOWNLOAD_DIR.get() {
+        Some(dir) => Ok(dir.clone()),
+        None => resolve_download_dir(),
+    }
+}
+
+/// 递归复制目录内容（覆盖同名文件，保留目标目录里的其它文件）。
+fn copy_dir_all(from: &Path, to: &Path) -> std::result::Result<(), String> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(to).map_err(|e| format!("创建 {} 失败：{e}", to.display()))?;
+    for entry in std::fs::read_dir(from).map_err(|e| format!("读取 {} 失败：{e}", from.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir_all(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst).map_err(|e| format!("复制 {} 失败：{e}", src.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// 迁移元数据（数据库 + 封面 + 截图 + 预告片），**不迁移视频文件**。
+fn migrate_metadata(from: &Path, to: &Path) -> std::result::Result<(), String> {
+    if same_path(from, to) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(to).map_err(|e| format!("创建 {} 失败：{e}", to.display()))?;
+    // WAL 一并复制（强制退出时最新改动可能还在 WAL 里）；-shm 由 SQLite 自动重建
+    for name in ["cinema.db", "cinema.db-wal"] {
+        let src = from.join(name);
+        if src.is_file() {
+            std::fs::copy(&src, to.join(name))
+                .map_err(|e| format!("复制 {} 失败：{e}", src.display()))?;
+        }
+    }
+    for sub in ["posters", "shots", "trailers"] {
+        copy_dir_all(&from.join(sub), &to.join(sub))?;
+    }
+    Ok(())
+}
+
+/// 启动时解析目录并完成待迁移的元数据，返回本次生效的元数据目录。
+///
+/// 迁移失败时继续使用旧目录：宁可这次不搬家，也不让用户看到一个空库。
+fn init_storage() -> std::result::Result<PathBuf, String> {
+    let env_meta = env_data_dir();
+    let config = read_storage_config();
+    let mut next = config.clone();
+
+    // 目标元数据目录：环境变量优先，其余按设置文件 / 默认
+    let target = match &env_meta {
+        Some(dir) => PathBuf::from(dir),
+        None => config
+            .metadata_dir
+            .clone()
+            .and_then(|dir| normalize_dir(&dir))
+            .map(PathBuf::from)
+            .unwrap_or_else(default_data_dir),
+    };
+
+    // 迁移来源：记录的一次性迁移；旧版本设置把默认目录当作来源补一次自动迁移
+    let mut migrate_from = if env_meta.is_some() {
+        None
+    } else {
+        config
+            .migrate_from
+            .clone()
+            .and_then(|dir| normalize_dir(&dir))
+    };
+    if migrate_from.is_none() && env_meta.is_none() && config.version < STORAGE_CONFIG_VERSION {
+        let legacy_source = default_data_dir();
+        if config.metadata_dir.is_some()
+            && !target.join("cinema.db").exists()
+            && legacy_source.join("cinema.db").exists()
+        {
+            migrate_from = Some(legacy_source.display().to_string());
+        }
+    }
+
+    let mut active = target.clone();
+    if let Err(err) = ensure_dir(&target, "元数据目录") {
+        // 目标目录不可用（盘未接、权限丢失）：继续用旧目录，绝不让播放器打不开
+        eprintln!("[存储] 目标元数据目录不可用，本次回退：{err}");
+        let fallback = migrate_from
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(default_data_dir);
+        ensure_dir(&fallback, "默认数据目录")?;
+        active = fallback;
+        // 保留 next.migrate_from，下次启动继续尝试
+    } else if let Some(from) = migrate_from {
+        let from_path = PathBuf::from(&from);
+        if same_path(&from_path, &target) {
+            next.migrate_from = None;
+        } else {
+            match migrate_metadata(&from_path, &target) {
+                Ok(()) => {
+                    next.migrate_from = None;
+                    println!(
+                        "[存储] 元数据已迁移：{} → {}",
+                        from_path.display(),
+                        target.display()
+                    );
+                }
+                Err(err) => {
+                    eprintln!("[存储] 元数据迁移失败，本次继续使用原目录：{err}");
+                    active = from_path;
+                }
+            }
+        }
+    }
+    next.version = STORAGE_CONFIG_VERSION;
+    if let Err(err) = write_storage_config(&next) {
+        eprintln!("[存储] 写设置文件失败：{err}");
+    }
+
+    let download = resolve_download_dir()?;
+    let _ = ACTIVE_DATA_DIR.set(active.clone());
+    let _ = ACTIVE_DOWNLOAD_DIR.set(download.clone());
+    println!(
+        "[存储] 元数据目录 = {}；下载目录 = {}",
+        active.display(),
+        download.display()
+    );
+    Ok(active)
+}
+
+/// 存储位置设置回执（`storage_settings` / `save_storage_settings`）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageSettingsView {
+    /// 本次运行实际使用的元数据目录（改设置后要重启才会变）。
+    data_dir: String,
+    /// 默认元数据目录（「恢复默认」会切回这里）。
+    default_dir: String,
+    /// 已保存但尚未生效的元数据目录。
+    pending_dir: Option<String>,
+    /// 本次运行实际使用的视频下载目录。
+    download_dir: String,
+    /// 默认视频下载目录。
+    default_download_dir: String,
+    /// 已保存但尚未生效的视频下载目录。
+    pending_download_dir: Option<String>,
+    /// 环境变量覆盖值；有值时对应区域禁止更改。
+    env_dir: Option<String>,
+    env_download_dir: Option<String>,
+    /// 设置文件位置，便于备份与排查。
+    config_path: String,
+    /// 上次启动未完成的迁移来源（迁移失败时仍有值）。
+    migrate_from: Option<String>,
+}
+
+fn storage_view() -> StorageSettingsView {
+    let config = read_storage_config();
+    let active = data_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let active_download = download_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    // 待生效目标：设置文件里的值，没设置就是默认目录
+    let target = config
+        .metadata_dir
+        .clone()
+        .and_then(|dir| normalize_dir(&dir))
+        .unwrap_or_else(|| default_data_dir().display().to_string());
+    let download_target = config
+        .download_dir
+        .clone()
+        .and_then(|dir| normalize_dir(&dir))
+        .unwrap_or_else(|| default_download_dir().display().to_string());
+    StorageSettingsView {
+        data_dir: active.clone(),
+        default_dir: default_data_dir().display().to_string(),
+        pending_dir: (!same_path(Path::new(&target), Path::new(&active))).then_some(target),
+        download_dir: active_download.clone(),
+        default_download_dir: default_download_dir().display().to_string(),
+        pending_download_dir: (!same_path(
+            Path::new(&download_target),
+            Path::new(&active_download),
+        ))
+        .then_some(download_target),
+        env_dir: env_data_dir(),
+        env_download_dir: env_download_dir(),
+        config_path: storage_config_path().display().to_string(),
+        migrate_from: config.migrate_from,
+    }
+}
+
+/// 读取当前存储位置。界面打开设置时调用一次。
+#[tauri::command]
+fn storage_settings() -> StorageSettingsView {
+    storage_view()
+}
+
+/// 保存存储位置。`None` 表示该项不修改；恢复默认由前端显式传入默认目录。
+///
+/// 元数据目录切到空目录时登记一次性迁移（重启后在打开数据库之前完成复制），
+/// 切到已有 `cinema.db` 的目录则直接使用那个库，不覆盖。
+#[tauri::command]
+fn save_storage_settings(
+    metadata_dir: Option<String>,
+    download_dir: Option<String>,
+) -> std::result::Result<StorageSettingsView, String> {
+    let mut config = read_storage_config();
+    config.version = STORAGE_CONFIG_VERSION;
+
+    if let Some(raw) = metadata_dir {
+        let dir = normalize_dir(&raw).ok_or("元数据目录不能为空")?;
+        let path = PathBuf::from(&dir);
+        if !path.is_absolute() {
+            return Err("请选择绝对路径".into());
+        }
+        if let Some(env) = env_data_dir() {
+            if env != dir {
+                return Err(format!(
+                    "当前由环境变量 CINEMA_DATA_DIR 指定元数据目录（{env}），请先移除该变量再更改"
+                ));
+            }
+        }
+        ensure_dir(&path, "元数据目录")?;
+        write_probe(&path)?;
+        let active = data_dir()?;
+        if !same_path(&path, &active) {
+            // 目标已有库：直接切过去；空目录：重启时自动迁移当前库
+            config.migrate_from = if path.join("cinema.db").exists() {
+                None
+            } else {
+                Some(active.display().to_string())
+            };
+        } else {
+            config.migrate_from = None;
+        }
+        config.metadata_dir = (!same_path(&path, &default_data_dir())).then(|| dir);
+    }
+
+    if let Some(raw) = download_dir {
+        let dir = normalize_dir(&raw).ok_or("下载目录不能为空")?;
+        let path = PathBuf::from(&dir);
+        if !path.is_absolute() {
+            return Err("请选择绝对路径".into());
+        }
+        if let Some(env) = env_download_dir() {
+            if env != dir {
+                return Err(format!(
+                    "当前由环境变量 CINEMA_DOWNLOAD_DIR 指定下载目录（{env}），请先移除该变量再更改"
+                ));
+            }
+        }
+        ensure_dir(&path, "下载目录")?;
+        write_probe(&path)?;
+        config.download_dir = (!same_path(&path, &default_download_dir())).then(|| dir);
+    }
+
+    write_storage_config(&config)?;
+    Ok(storage_view())
+}
+
+/// 重启应用，让新的存储位置生效（元数据迁移在下次启动、打开数据库之前完成）。
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart();
 }
 
 /// 海报缓存目录（与 `DbStore` 的门面一致：`<数据目录>/posters`），不存在则创建。
@@ -583,12 +1039,13 @@ fn poster_dir() -> std::result::Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// 在线影片缓存目录（`<数据目录>/streams`），不存在则创建。
+/// 在线影片下载 / 缓存目录（默认 `<默认元数据目录>/streams`，可在「存储」里单独改）。
 ///
-/// 在线源采用「边下边播」：yt-dlp 后台把影片写到这里（`online-<hash>.mp4`），
-/// 播放内核打开这个**正在增长**的文件（见 L3 `online_site.rs` 模块注释）。
+/// 视频文件与视频信息分离：这里只放联网播放 / 下载的视频，元数据（数据库、封面、
+/// 截图、预告片）仍在数据目录。在线源采用「边下边播」：yt-dlp 后台把影片写到这里
+/// （`online-<hash>.mp4`），播放内核打开这个**正在增长**的文件（见 L3 `online_site.rs`）。
 fn streams_dir() -> std::result::Result<PathBuf, String> {
-    let dir = data_dir()?.join("streams");
+    let dir = download_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
@@ -628,6 +1085,65 @@ fn ytdlp_path() -> std::result::Result<PathBuf, String> {
     on_path("yt-dlp").ok_or_else(|| {
         "未找到 yt-dlp：请把 yt-dlp.exe 放到主程序同目录（或加入系统 PATH）后重试".to_string()
     })
+}
+
+/// 一次联网导入最多展开的页数上限：防误填页码，把一次导入拖成几小时。
+const MAX_IMPORT_PAGES: u32 = 300;
+
+/// 去掉 URL 里的分页参数 `page`，用于派生源身份与源地址。
+///
+/// 同一搜索页的第 1 页与第 3 页是同一批内容的不同页，不应各登记成一个源；
+/// 因此源 id 与源地址都基于去掉 `page` 的地址，其它查询参数与锚点原样保留。
+fn strip_page_param(url: &str) -> String {
+    let (head, frag) = match url.find('#') {
+        Some(i) => (&url[..i], &url[i..]),
+        None => (url, ""),
+    };
+    let Some(q) = head.find('?') else {
+        return url.to_owned();
+    };
+    let (path, query) = head.split_at(q);
+    let kept: Vec<&str> = query[1..]
+        .split('&')
+        .filter(|part| !part.is_empty() && *part != "page" && !part.starts_with("page="))
+        .collect();
+    if kept.is_empty() {
+        format!("{path}{frag}")
+    } else {
+        format!("{path}?{}{frag}", kept.join("&"))
+    }
+}
+
+/// 生成某一页的地址：已有 `page=` 就替换取值，没有就追加，保留其它查询参数与锚点。
+fn page_url(base: &str, page: u32) -> String {
+    let (head, frag) = match base.find('#') {
+        Some(i) => (&base[..i], &base[i..]),
+        None => (base, ""),
+    };
+    let (path, query) = match head.find('?') {
+        Some(i) => head.split_at(i),
+        None => (head, ""),
+    };
+    let mut parts: Vec<String> = if query.is_empty() {
+        Vec::new()
+    } else {
+        query[1..]
+            .split('&')
+            .filter(|part| !part.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let mut replaced = false;
+    for part in parts.iter_mut() {
+        if part == "page" || part.starts_with("page=") {
+            *part = format!("page={page}");
+            replaced = true;
+        }
+    }
+    if !replaced {
+        parts.push(format!("page={page}"));
+    }
+    format!("{path}?{}{frag}", parts.join("&"))
 }
 
 /// 由列表页 URL 派生源显示名：取主机名（如 `hanime1.me`），失败则回落到原 URL。
@@ -1691,6 +2207,7 @@ fn add_local_source(state: State<'_, AppState>, path: String) -> std::result::Re
         id: src.id.as_str().to_string(),
         name: src.name,
         location: src.location,
+        kind: source_kind_label(src.kind).to_owned(),
         state: "idle".into(),
         // 刚登记的源还没扫描，条目数一定是 0（扫描完成后前端会重新拉清单）
         item_count: 0,
@@ -1714,6 +2231,7 @@ fn list_sources(state: State<'_, AppState>) -> std::result::Result<Vec<SourceVie
             id: s.id.as_str().to_string(),
             name: s.name,
             location: s.location,
+            kind: source_kind_label(s.kind).to_owned(),
             state: match s.state {
                 SourceState::Idle => "idle",
                 SourceState::Scanning => "scanning",
@@ -2020,11 +2538,19 @@ struct OnlineImportView {
     discovered: u64,
     stored: u64,
     probed: u64,
+    /// 本次实际处理的页数（未指定页码范围时为 1）。
+    pages: u32,
+    /// 导入失败的页码（仅页码范围导入时可能非空；未指定范围时为空）。
+    failed_pages: Vec<u32>,
 }
 
 /// 联网导入：把粘贴的列表页 URL 登记为在线站点源并扫描。
 ///
-/// 同一 URL 重复导入会命中同一源 id（id 由 URL 派生）并幂等合并条目，
+/// 给出 `start_page` / `end_page` 时按页码自动翻页，连续导入这几页，全部条目
+/// 登记到**同一个源**（源 id 由去掉 `page` 参数的地址派生）；不给出时只导入地址
+/// 这一页，沿用原有行为。
+///
+/// 同一 URL 重复导入会命中同一源 id并幂等合并条目，
 /// 封面以「文件是否存在」判断是否重新抓取，不会重复下载。
 ///
 /// yt-dlp 缺失时**在开子进程之前**就返回可读提示，避免用户只看到晦涩的子进程错误。
@@ -2032,19 +2558,49 @@ struct OnlineImportView {
 fn online_import(
     state: State<'_, AppState>,
     url: String,
+    start_page: Option<u32>,
+    end_page: Option<u32>,
 ) -> std::result::Result<OnlineImportView, String> {
-    let url = url.trim().to_string();
-    if !url.starts_with("http://") && !url.starts_with("https://") {
+    let raw = url.trim().to_string();
+    if !raw.starts_with("http://") && !raw.starts_with("https://") {
         return Err("请填写以 http(s) 开头的列表页地址".into());
     }
+
+    // 源身份与源地址都不带分页参数：翻页导入的是同一个源的不同页
+    let base = strip_page_param(&raw);
+    let pages: Vec<(Option<u32>, String)> = match (start_page, end_page) {
+        (None, None) => vec![(None, raw.clone())],
+        (start, end) => {
+            let start = start.unwrap_or(1).max(1);
+            let end = end.unwrap_or(start);
+            if end < start {
+                return Err("结束页不能小于起始页".into());
+            }
+            if end - start + 1 > MAX_IMPORT_PAGES {
+                return Err(format!("一次最多展开 {MAX_IMPORT_PAGES} 页，请缩小页码范围"));
+            }
+            (start..=end)
+                .map(|page| {
+                    // 第 1 页直接用原地址：站点未必接受显式的 page=1
+                    let target = if page == 1 {
+                        base.clone()
+                    } else {
+                        page_url(&base, page)
+                    };
+                    (Some(page), target)
+                })
+                .collect()
+        }
+    };
+
     let ytdlp = ytdlp_path()?;
     let covers = poster_dir()?;
 
     let src = MediaSource {
-        id: source_id_for(&url),
+        id: source_id_for(&base),
         kind: SourceKind::OnlineSite,
-        name: site_label(&url),
-        location: url,
+        name: site_label(&base),
+        location: base.clone(),
         exclude_rules: None,
         state: SourceState::Idle,
         last_scan_at: None,
@@ -2055,19 +2611,86 @@ fn online_import(
     }
 
     let provider = OnlineSiteProvider::new(ytdlp, covers, streams_dir()?, Arc::clone(&state.downloads));
-    let report = ImportService::import(state.store.as_ref(), &provider, &src)
-        .map_err(|e| e.reason().to_string())?;
+    let mut discovered = 0u64;
+    let mut stored = 0u64;
+    let mut probed = 0u64;
+    let mut succeeded = 0u64;
+    let mut failed_pages: Vec<u32> = Vec::new();
+    let mut first_error: Option<String> = None;
 
-    // 导入成功就顺手在后台抓一遍封面：封面来自列表页卡片，与条目枚举共用同一页抓取，
-    // 因此此刻抓最省事；用户若只是「导入完就退出」，封面也不会等到下次浏览才补
-    spawn_cover_fetch(&state, &src);
+    for (page_no, target) in &pages {
+        // 每页都换成一个同 id、只在 location 上不同的临时源：条目 id 由详情页地址
+        // 派生，所以跨页重复的条目会幂等合并，不会因为翻页产生第二份
+        let page_src = MediaSource {
+            location: target.clone(),
+            ..src.clone()
+        };
+        match ImportService::import(state.store.as_ref(), &provider, &page_src) {
+            Ok(report) => {
+                discovered += report.stat.discovered;
+                stored += report.stored;
+                probed += report.probed;
+                succeeded += 1;
+            }
+            Err(err) => {
+                if let Some(page) = page_no {
+                    failed_pages.push(*page);
+                }
+                if first_error.is_none() {
+                    first_error = Some(err.reason().to_string());
+                }
+            }
+        }
+    }
+
+    // 单页导入沿用原行为；多页时最后一页的结局会覆盖源记录，这里统一还原：
+    // 地址回到不带分页参数的列表页，状态回到 idle（部分页失败但整体有成功时，
+    // 不在源清单上显示「扫描失败」），并清掉失败原因
+    let existing = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        MediaSourceRepo::get(db.conn(), &src.id).map_err(|e| e.to_string())?
+    };
+    let restore = MediaSource {
+        state: if succeeded > 0 {
+            SourceState::Idle
+        } else {
+            existing.as_ref().map_or(SourceState::Idle, |s| s.state)
+        },
+        last_scan_at: existing.and_then(|s| s.last_scan_at),
+        ..src.clone()
+    };
+    {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        MediaSourceRepo::upsert(db.conn(), &restore).map_err(|e| e.to_string())?;
+    }
+    if succeeded == 0 {
+        return Err(first_error.unwrap_or_else(|| "导入失败".to_string()));
+    }
+    state
+        .store
+        .set_source_error(&src.id, None)
+        .map_err(|e| e.to_string())?;
+
+    // 导入成功就顺手在后台把每一页的封面各抓一遍：封面来自列表页卡片，
+    // 与条目枚举共用同一页抓取，因此此刻抓最省事；用户若只是「导入完就退出」，
+    // 封面也不会等到下次浏览才补
+    spawn_cover_fetch_pages(
+        &state,
+        &src,
+        pages.iter().map(|(_, target)| target.clone()).collect(),
+    );
+
+    // 列表页只给标题与详情页地址：字段、评论与截图在后台逐条补齐，不阻塞本次导入
+    spawn_online_scrape(&state, &src.id);
 
     Ok(OnlineImportView {
         source_id: src.id.as_str().to_string(),
         source_name: src.name,
-        discovered: report.stat.discovered,
-        stored: report.stored,
-        probed: report.probed,
+        discovered,
+        stored,
+        probed,
+        pages: pages.len() as u32,
+        failed_pages,
     })
 }
 
@@ -2112,11 +2735,23 @@ fn item_cover(state: State<'_, AppState>, item_id: String) -> std::result::Resul
 /// 这也是**重启后的自愈路径**：覆盖「封面文件被清掉 / 换机导入」等情况——用户一打开
 /// 库、第一张卡片请求封面，就会触发一次补抓。
 fn spawn_cover_fetch(state: &AppState, src: &MediaSource) {
+    spawn_cover_fetch_pages(state, src, vec![src.location.clone()]);
+}
+
+/// 在后台为**一组列表页**各抓一遍封面（同一源在途时只抓一次）。任何失败都静默忽略。
+///
+/// 多页导入时一页的封面并不全在源地址那一页上，因此这里按页循环；在途去重仍按源，
+/// 一次导入的后台任务会覆盖它展开的所有页。
+fn spawn_cover_fetch_pages(state: &AppState, src: &MediaSource, pages: Vec<String>) {
     if src.kind != SourceKind::OnlineSite {
         return;
     }
-    let location = src.location.trim().to_owned();
-    if location.is_empty() {
+    let pages: Vec<String> = pages
+        .into_iter()
+        .map(|page| page.trim().to_owned())
+        .filter(|page| !page.is_empty())
+        .collect();
+    if pages.is_empty() {
         return;
     }
     // 条目超过这个时限仍在途，视为那次抓取没成功，允许再试一次
@@ -2140,8 +2775,559 @@ fn spawn_cover_fetch(state: &AppState, src: &MediaSource) {
     let downloads = Arc::clone(&state.downloads);
     std::thread::spawn(move || {
         // 只抓封面：不会起影片下载（`downloads` 仅为构造提供者所需）
-        OnlineSiteProvider::new(ytdlp, covers, streams, downloads).fetch_covers(&location);
+        let provider = OnlineSiteProvider::new(ytdlp, covers, streams, downloads);
+        for page in pages {
+            provider.fetch_covers(&page);
+        }
     });
+}
+
+// ---------------------------------------------------------------------------
+// 联网条目详情补齐（M7）：列表页只有标题与详情页地址，字段 / 评论 / 截图在后台逐条抓
+// ---------------------------------------------------------------------------
+
+/// 联网条目的视频 id（详情页地址里的 `v=NNNNN`），用作截图文件名。
+fn online_video_id(url: &str) -> Option<String> {
+    let at = url.find("v=")?;
+    let digits: String = url[at + 2..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
+/// 抓一条联网条目的详情页字段 + 评论 + 一张预览截图并入库。
+///
+/// 返回 `(评论数, 截图数)`。截图失败只静默跳过（站点不保证帧图可下载），
+/// 其余任何错误都会把条目标成 `Failed` 并记录原因，供界面显示与下次重试。
+fn scrape_online_item(
+    store: &DbStore,
+    provider: &OnlineSiteProvider,
+    id: &ItemId,
+) -> std::result::Result<(usize, usize), String> {
+    match scrape_online_item_inner(store, provider, id) {
+        Ok(counts) => Ok(counts),
+        Err(reason) => {
+            let _ = store.set_scrape_state(id, ScrapeState::Failed, Some(&reason));
+            Err(reason)
+        }
+    }
+}
+
+fn scrape_online_item_inner(
+    store: &DbStore,
+    provider: &OnlineSiteProvider,
+    id: &ItemId,
+) -> std::result::Result<(usize, usize), String> {
+    let mut item = store.item(id).map_err(|err| err.reason().to_owned())?;
+    let url = item
+        .url
+        .clone()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("条目 {} 缺少详情页地址", id.0))?;
+
+    let detail = scrape_detail_with_retry(provider, &url, &mut |message| {
+        println!("[联网元数据] {url} 抓取失败，准备重试：{message}");
+    })
+    .map_err(|err| err.reason().to_owned())?;
+
+    if !detail.title.trim().is_empty() {
+        item.title = detail.title.trim().to_owned();
+    }
+    if let Some(overview) = detail.overview.filter(|value| !value.trim().is_empty()) {
+        item.overview = Some(overview);
+    }
+    if let Some(duration_ms) = detail.duration_ms {
+        item.duration_ms = Some(duration_ms);
+    }
+    if let Some(date) = detail.release_date.filter(|value| !value.is_empty()) {
+        // 年份从发行日期前 4 位取；解析不出来就保留已有值
+        item.year = date
+            .get(0..4)
+            .and_then(|year| year.parse::<i32>().ok())
+            .or(item.year);
+        item.release_date = Some(date);
+    }
+    if let Some(code) = detail.external_code.filter(|value| !value.trim().is_empty()) {
+        item.external_code = Some(code);
+    }
+    item.detail_url = Some(url.clone());
+    item.scraped_at = Some(now_ms());
+    item.scrape_state = ScrapeState::Done;
+    item.scrape_error = None;
+    item.identify_state = IdentifyState::Identified;
+    item.meta_state = MetaState::Complete;
+    store
+        .save_scraped(&item)
+        .map_err(|err| err.reason().to_owned())?;
+
+    // 类别与标签合并后统一写入「类别」维度（站点把二者混排展示）
+    let mut categories: Vec<String> = Vec::new();
+    for value in detail.categories.iter().chain(detail.tags.iter()) {
+        let text = value.trim();
+        if !text.is_empty() && !categories.iter().any(|existing| existing == text) {
+            categories.push(text.to_owned());
+        }
+    }
+    if !categories.is_empty() {
+        store
+            .replace_metadata_tags(id, DIM_CATEGORY, &categories)
+            .map_err(|err| err.reason().to_owned())?;
+    }
+    if let Some(author) = detail
+        .author
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        store
+            .replace_metadata_tags(id, DIM_MAKER, &[author.to_owned()])
+            .map_err(|err| err.reason().to_owned())?;
+    }
+    // 年份：从发行日期（或已有年份）取 `2015年` 形式的取值
+    if let Some(label) = year_label_from(item.release_date.as_deref(), item.year) {
+        store
+            .replace_metadata_tags(id, DIM_YEAR, &[label])
+            .map_err(|err| err.reason().to_owned())?;
+    }
+
+    // 截图：每个条目只有一张 `og:image` 视频帧；失败不算整体失败
+    let mut screenshots = 0usize;
+    if let Some(frame_url) = detail
+        .frame_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(video_id) = online_video_id(&url) {
+            if let Ok(bytes) = provider.fetch_image_bytes(frame_url) {
+                let file_name = format!("{video_id}h.jpg");
+                let written = store.write_screenshot(id, &file_name, &bytes).is_ok();
+                let replaced = store
+                    .replace_screenshots(
+                        id,
+                        &[ScrapedImage {
+                            file_name: file_name.clone(),
+                            source_url: Some(frame_url.to_owned()),
+                        }],
+                    )
+                    .is_ok();
+                if written && replaced {
+                    screenshots = 1;
+                }
+            }
+        }
+    }
+
+    let comment_count = detail.comments.len();
+    store
+        .replace_comments(id, &detail.comments)
+        .map_err(|err| err.reason().to_owned())?;
+    store
+        .reindex_item(id)
+        .map_err(|err| err.reason().to_owned())?;
+    store
+        .set_scrape_state(id, ScrapeState::Done, None)
+        .map_err(|err| err.reason().to_owned())?;
+    Ok((comment_count, screenshots))
+}
+
+/// 详情页抓取的重试策略。
+///
+/// 目标站点的 CDN 在连续请求时会**间歇性掐断 TLS**（`SSL_ERROR_SYSCALL`、
+/// `curl: (35)`），这不是代码问题，隔几秒重试通常就能过。只在网络类错误上重试；
+/// 解析类（页面 404 / DOM 变了）重试无意义，直接失败。
+fn scrape_detail_with_retry(
+    provider: &OnlineSiteProvider,
+    url: &str,
+    log: &mut dyn FnMut(&str),
+) -> PortResult<OnlineDetail> {
+    const DELAYS_MS: [u64; 3] = [0, 3000, 8000];
+    let mut last = None;
+    for (attempt, delay) in DELAYS_MS.iter().enumerate() {
+        if *delay > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(*delay));
+        }
+        match provider.scrape_detail(url) {
+            Ok(detail) => return Ok(detail),
+            Err(err) => {
+                let message = err.reason().to_owned();
+                if !is_transient_network_error(&message) {
+                    return Err(err);
+                }
+                log(&message);
+                last = Some(err);
+                let _ = attempt;
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| PortError::Backend(format!("未能获取详情页：{url}"))))
+}
+
+/// 是否为「重试可能成功」的网络类错误（TLS 掐断 / 连接重置 / 超时 / 403）。
+fn is_transient_network_error(message: &str) -> bool {
+    [
+        "SSL",
+        "BoringSSL",
+        "Connection closed",
+        "Connection reset",
+        "Connection aborted",
+        "timed out",
+        "timeout",
+        "curl: (35)",
+        "curl: (56)",
+        "Unable to download webpage",
+        "HTTP Error 403",
+        "HTTP Error 429",
+        "HTTP Error 5",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+/// 在后台逐条补齐某个在线源的条目（顺序处理，避免把站点反爬触发到极限）。
+///
+/// 线程内不持有 `State` 引用：先把需要的东西克隆出来，命令才能立刻返回。
+fn spawn_online_scrape(state: &AppState, source_id: &SourceId) {
+    let (Ok(ytdlp), Ok(covers), Ok(streams)) = (ytdlp_path(), poster_dir(), streams_dir()) else {
+        println!("[联网元数据] 缺少 yt-dlp 或缓存目录，已跳过详情补齐");
+        return;
+    };
+    let store = Arc::clone(&state.store);
+    let app = state.app.clone();
+    let downloads = Arc::clone(&state.downloads);
+    let source = source_id.clone();
+    std::thread::spawn(move || {
+        let provider = OnlineSiteProvider::new(ytdlp, covers, streams, downloads);
+        let ids = match store.pending_ids(Some(&source)) {
+            Ok(ids) => ids,
+            Err(err) => {
+                println!("[联网元数据] 读取待抓条目失败：{}", err.reason());
+                return;
+            }
+        };
+        let total = ids.len();
+        let mut failed = 0usize;
+        for (index, id) in ids.iter().enumerate() {
+            if scrape_online_item(store.as_ref(), &provider, id).is_err() {
+                failed += 1;
+            }
+            let _ = app.emit(
+                "scrape-progress",
+                ScrapeProgressView {
+                    item_id: id.0.clone(),
+                    done: index + 1,
+                    total,
+                },
+            );
+            // 条目之间留出间隔：连续请求会被站点的 Cloudflare 判为爬虫（TLS 直接掐断）
+            if index + 1 < total {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+            }
+        }
+        let done = total - failed;
+        println!("[联网元数据] 完成 {done} 条，失败 {failed} 条");
+        let _ = app.emit(
+            "online-meta-done",
+            serde_json::json!({
+                "sourceId": source.as_str(),
+                "done": done,
+                "failed": failed
+            }),
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 联网视频下载（完整落盘 + 进度）
+// ---------------------------------------------------------------------------
+
+/// 更新一条下载任务的快照并推给界面。
+fn publish_download(
+    registry: &Mutex<std::collections::HashMap<String, OnlineDownloadView>>,
+    app: &AppHandle,
+    view: OnlineDownloadView,
+) {
+    if let Ok(mut map) = registry.lock() {
+        map.insert(view.item_id.clone(), view.clone());
+    }
+    let _ = app.emit("online-download-progress", view);
+}
+
+/// 下载目录里是否已有该视频。
+///
+/// 文件名里的 id 是 yt-dlp 自己算出来的：generic 提取器把详情页地址的尾段整段当 id，
+/// 实际落盘名称形如 `标题 [watch？v=143645-1].mp4`（`--windows-filenames` 还会把
+/// `?` 写成全角 `？`）。因此不能只找 `[143645]` —— 那样永远匹配不上，
+/// 每次点下载都会重新下一遍。
+fn existing_download(dir: &Path, video_id: &str) -> Option<PathBuf> {
+    if video_id.is_empty() {
+        return None;
+    }
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // 未完成的 `.part` / `.ytdl` 不算已下载，交给 `--continue` 续传
+        if name.ends_with(".part") || name.ends_with(".ytdl") {
+            continue;
+        }
+        if !matches_video_id(&name, video_id) {
+            continue;
+        }
+        // 只有几 KB 的残片不能当「已下载」，否则用户永远补不全
+        if entry.metadata().map(|meta| meta.len()).unwrap_or(0) < 1024 * 1024 {
+            continue;
+        }
+        return Some(path);
+    }
+    None
+}
+
+/// 文件名里是否含该视频 id：兼容 `[143645]`、`v=143645`、`v？143645`（全角问号）
+/// 三种写法，并要求 id 后面不是数字，避免 `14365` 误命中 `143650`。
+fn matches_video_id(name: &str, video_id: &str) -> bool {
+    if name.contains(&format!("[{video_id}]")) {
+        return true;
+    }
+    for sep in ["v=", "v？"] {
+        let mut rest = name;
+        while let Some(at) = rest.find(sep) {
+            let after = &rest[at + sep.len()..];
+            if let Some(tail) = after.strip_prefix(video_id) {
+                if tail.chars().next().map_or(true, |c| !c.is_ascii_digit()) {
+                    return true;
+                }
+            }
+            rest = after;
+        }
+    }
+    false
+}
+
+/// 跑完一条下载（在后台线程里调用），把终态写回任务表。
+fn run_download(
+    provider: &OnlineSiteProvider,
+    registry: &Mutex<std::collections::HashMap<String, OnlineDownloadView>>,
+    app: &AppHandle,
+    item_id: &str,
+    title: &str,
+    url: &str,
+    dir: &Path,
+) {
+    let mut base = OnlineDownloadView {
+        item_id: item_id.to_owned(),
+        title: title.to_owned(),
+        state: "running".into(),
+        percent: 0.0,
+        dest: None,
+        error: None,
+    };
+
+    // 已经下过（文件在下载目录里）就不再重复跑一遍
+    if let Some(path) = existing_download(dir, &online_video_id(url).unwrap_or_default()) {
+        base.state = "done".into();
+        base.percent = 100.0;
+        base.dest = Some(path.to_string_lossy().into_owned());
+        publish_download(registry, app, base);
+        return;
+    }
+
+    let mut last_percent = -1.0f64;
+    let result = provider.download_to_dir(url, dir, |percent| {
+        // 整数百分比变化才发事件：yt-dlp 每秒几十行，全发会把 webview 打满
+        if percent.floor() > last_percent {
+            last_percent = percent.floor();
+            let mut view = base.clone();
+            view.percent = percent;
+            publish_download(registry, app, view);
+        }
+    });
+    match result {
+        Ok(path) => {
+            base.state = "done".into();
+            base.percent = 100.0;
+            base.dest = Some(path.to_string_lossy().into_owned());
+            println!("[联网下载] 完成：{}", base.dest.as_deref().unwrap_or(""));
+        }
+        Err(err) => {
+            base.state = "failed".into();
+            base.error = Some(err.reason().to_owned());
+            println!("[联网下载] 失败：{}", err.reason());
+        }
+    }
+    publish_download(registry, app, base);
+}
+
+/// 起一个后台线程顺序下载一批视频（站点反爬，绝不并发）。
+fn spawn_online_downloads(
+    state: &AppState,
+    jobs: Vec<(String, String, String)>,
+) -> std::result::Result<usize, String> {
+    if jobs.is_empty() {
+        return Ok(0);
+    }
+    let dir = download_dir()?;
+    let (Ok(ytdlp), Ok(covers), Ok(streams)) = (ytdlp_path(), poster_dir(), streams_dir()) else {
+        return Err("未找到 yt-dlp 或缓存目录不可用".to_string());
+    };
+    let registry = Arc::clone(&state.online_downloads);
+    let app = state.app.clone();
+    let downloads = Arc::clone(&state.downloads);
+
+    // 下载目录里已有完整文件的条目直接标完成：绝不重新下一遍
+    let mut jobs = jobs;
+    jobs.retain(|(id, title, url)| {
+        let video_id = online_video_id(url).unwrap_or_default();
+        let Some(path) = existing_download(&dir, &video_id) else {
+            return true;
+        };
+        publish_download(
+            registry.as_ref(),
+            &app,
+            OnlineDownloadView {
+                item_id: id.clone(),
+                title: title.clone(),
+                state: "done".into(),
+                percent: 100.0,
+                dest: Some(path.to_string_lossy().into_owned()),
+                error: None,
+            },
+        );
+        false
+    });
+    if jobs.is_empty() {
+        return Ok(0);
+    }
+    let count = jobs.len();
+    // 先登记为「排队中」，界面立刻能看到整批任务
+    for (id, title, _) in &jobs {
+        publish_download(
+            registry.as_ref(),
+            &app,
+            OnlineDownloadView {
+                item_id: id.clone(),
+                title: title.clone(),
+                state: "running".into(),
+                percent: 0.0,
+                dest: None,
+                error: None,
+            },
+        );
+    }
+    std::thread::spawn(move || {
+        let provider = OnlineSiteProvider::new(ytdlp, covers, streams, downloads);
+        for (index, (id, title, url)) in jobs.iter().enumerate() {
+            run_download(&provider, registry.as_ref(), &app, id, title, url, &dir);
+            if index + 1 < jobs.len() {
+                std::thread::sleep(std::time::Duration::from_millis(1200));
+            }
+        }
+        let _ = app.emit("online-download-done", serde_json::json!({ "count": count }));
+    });
+    Ok(count)
+}
+
+/// 下载单条联网视频到「视频下载目录」。
+#[tauri::command]
+fn start_online_download(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> std::result::Result<OnlineDownloadView, String> {
+    if let Ok(map) = state.online_downloads.lock() {
+        if let Some(view) = map.get(&item_id) {
+            // 下载中：直接回任务快照
+            if view.state == "running" {
+                return Ok(view.clone());
+            }
+            // 已完成：只有文件还在才算数（用户删了文件就该允许重新下）
+            if view.state == "done" {
+                let alive = view
+                    .dest
+                    .as_deref()
+                    .map(|dest| Path::new(dest).is_file())
+                    .unwrap_or(false);
+                if alive {
+                    return Ok(view.clone());
+                }
+            }
+        }
+    }
+    let (item, src) = load_item(&state, &item_id)?;
+    if src.kind != SourceKind::OnlineSite {
+        return Err("只有联网导入的条目支持下载视频".to_string());
+    }
+    let url = item
+        .url
+        .clone()
+        .ok_or_else(|| "该条目缺少详情页地址".to_string())?;
+
+    // 下载目录里已有完整文件：标完成返回，不再启动 yt-dlp
+    let dir = download_dir()?;
+    if let Some(path) = existing_download(&dir, &online_video_id(&url).unwrap_or_default()) {
+        let view = OnlineDownloadView {
+            item_id: item.id.0.clone(),
+            title: item.title.clone(),
+            state: "done".into(),
+            percent: 100.0,
+            dest: Some(path.to_string_lossy().into_owned()),
+            error: None,
+        };
+        publish_download(state.online_downloads.as_ref(), &state.app, view.clone());
+        return Ok(view);
+    }
+
+    spawn_online_downloads(&state, vec![(item.id.0.clone(), item.title.clone(), url)])?;
+    Ok(OnlineDownloadView {
+        item_id: item.id.0.clone(),
+        title: item.title,
+        state: "running".into(),
+        percent: 0.0,
+        dest: None,
+        error: None,
+    })
+}
+
+/// 下载某个在线源的全部条目（跳过已下载过的），返回入队条数。
+#[tauri::command]
+fn download_online_source(
+    state: State<'_, AppState>,
+    source_id: String,
+) -> std::result::Result<usize, String> {
+    let scope = SourceId::from(source_id);
+    let jobs = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        let src = MediaSourceRepo::get(db.conn(), &scope)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("媒体源不存在：{}", scope))?;
+        if src.kind != SourceKind::OnlineSite {
+            return Err("只有联网导入的媒体源支持下载视频".to_string());
+        }
+        MediaItemRepo::list(db.conn(), Some(&scope))
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|item| {
+                item.url
+                    .clone()
+                    .map(|url| (item.id.0.clone(), item.title.clone(), url))
+            })
+            .collect::<Vec<_>>()
+    };
+    spawn_online_downloads(&state, jobs)
+}
+
+/// 当前全部下载任务（界面打开时拉一次，之后靠事件增量更新）。
+#[tauri::command]
+fn online_download_status(state: State<'_, AppState>) -> Vec<OnlineDownloadView> {
+    state
+        .online_downloads
+        .lock()
+        .map(|map| map.values().cloned().collect())
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -2341,7 +3527,17 @@ fn place_screen_host(state: &AppState, slot: u32, fill: bool, rect: Option<(i32,
         // 画面盖住页面，点击只能在原生窗口里截获后转发：单路由前端切换暂停，多屏由前端聚焦该格
         let app = state.app.clone();
         if slot == 0 && fill {
+            // 方向键在原生画面窗口里截获后转发给页面：画面压住页面时焦点可能在它身上，
+            // 不转发的话按键会被原生窗口吞掉（现场表现为上/下键变成快进快退）。
+            let app_key = state.app.clone();
+            host.set_on_key(move |vk| {
+                let _ = app_key.emit("player-key", vk);
+            });
             host.set_on_click(move || {
+                // 点击画面后把键盘焦点还给页面，后续按键全部走前端那套处理
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_focus();
+                }
                 let _ = app.emit("player-click", ());
             });
             // 控制条自动隐藏后，指针落在原生画面上也要能唤醒：移动事件在 Rust 侧节流转发。
@@ -2390,6 +3586,7 @@ fn open_player(
     item_id: String,
     start_ms: Option<i64>,
 ) -> std::result::Result<PlaybackStatusView, String> {
+    println!("[播放] open_player {item_id}");
     // 单路播放只允许 0 号屏位：先退出多屏，避免重复占用
     close_all_screens(&state);
 
@@ -2547,15 +3744,84 @@ fn set_paused(state: State<'_, AppState>, paused: bool) {
 
 #[tauri::command]
 fn seek(state: State<'_, AppState>, position_ms: i64) {
+    println!("[播放] seek -> {position_ms} ms");
     if let Some(slot) = current_slot(&state) {
-        if let Ok(svc) = state.playback.lock() {
-            svc.screen_command(slot, PlayerCmd::Seek { position_ms });
+        // 在线源（边下边播）的缓存文件还在增长：mpv 在装载时就把当时的文件大小
+        // 记死了，往后 seek 会被判为「超出文件末尾」而静默失败——表现就是快进
+        // 没反应。这里改成「按目标位置重新装载文件」，让 demuxer 按**当前**大小
+        // 重新解析；下载已完成时普通 seek 即可，不必重载。
+        let streaming = slot_stream(&state, slot)
+            .filter(|path| state.downloads.state(path) == DownloadState::Running);
+        match (streaming, state.factory.screen(slot)) {
+            (Some(path), Some(core)) => {
+                let ref_ = PlayableRef::local(path.to_string_lossy().into_owned());
+                let duration_ms = core.duration_ms();
+                let _ = core.load(
+                    ref_,
+                    Some(Progress {
+                        position_ms,
+                        duration_ms,
+                    }),
+                );
+            }
+            _ => {
+                if let Ok(svc) = state.playback.lock() {
+                    svc.screen_command(slot, PlayerCmd::Seek { position_ms });
+                }
+            }
         }
         // 跳转后清空实时字幕缓冲、重置句界、丢弃旧句；忽略其错误
         if let Ok(mut runtime) = state.subtitles.lock() {
             let _ = runtime.main().service.on_seek(position_ms);
         }
     }
+}
+
+/// 设置音量（0–100），返回真正生效的音量。
+#[tauri::command]
+fn set_volume(state: State<'_, AppState>, volume: f64) -> Option<f64> {
+    let volume = volume.clamp(0.0, 100.0);
+    println!("[播放] set_volume -> {volume}");
+    if let Some(slot) = current_slot(&state) {
+        if let Ok(svc) = state.playback.lock() {
+            svc.screen_command(slot, PlayerCmd::SetVolume(volume));
+        }
+    }
+    // 预览实例也同步：详情页里播预告片时上下键同样要能调音量
+    if let Some(core) = state.factory.preview() {
+        core.command(PlayerCmd::SetVolume(volume));
+    }
+    // 音量提示用 mpv 自己的 OSD：原生画面窗口压在 WebView 之上，页面层的提示看不见
+    let osd = volume_osd_text(volume);
+    if let Some(slot) = current_slot(&state) {
+        if let Some(core) = state.factory.screen(slot) {
+            core.show_osd(&osd, 1200);
+        }
+    }
+    if let Some(core) = state.factory.preview() {
+        core.show_osd(&osd, 1200);
+    }
+    Some(volume)
+}
+
+/// 音量提示文案：10 格进度条便于一眼看出大小，纯 ASCII 避免字体缺字形。
+fn volume_osd_text(volume: f64) -> String {
+    let pct = volume.round().clamp(0.0, 100.0) as usize;
+    let filled = pct / 10;
+    format!("音量 {pct}%  [{}{}]", "#".repeat(filled), "-".repeat(10 - filled))
+}
+
+/// 读取当前音量（0–100）。播放内核读不到时返回 `None`，界面沿用本地记忆值。
+#[tauri::command]
+fn player_volume(state: State<'_, AppState>) -> Option<f64> {
+    if let Some(slot) = current_slot(&state) {
+        if let Some(core) = state.factory.screen(slot) {
+            if let Some(volume) = core.volume() {
+                return Some(volume);
+            }
+        }
+    }
+    state.factory.preview().and_then(|core| core.volume())
 }
 
 #[tauri::command]
@@ -3242,6 +4508,64 @@ async fn scrape_item(
     item_id: String,
     force: Option<bool>,
 ) -> std::result::Result<ScrapeResultView, String> {
+    let target_id = ItemId::from(item_id.clone());
+    // 在线站点源的详情页字段由站点自己给出，不走 javdb 的番号搜索
+    let online = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        match MediaItemRepo::get(db.conn(), &target_id).map_err(|e| e.to_string())? {
+            Some(item) if item.url.is_some() => {
+                let src = MediaSourceRepo::get(db.conn(), &item.source_id)
+                    .map_err(|e| e.to_string())?;
+                matches!(src.map(|value| value.kind), Some(SourceKind::OnlineSite))
+            }
+            _ => false,
+        }
+    };
+    if online {
+        let store = Arc::clone(&state.store);
+        let downloads = Arc::clone(&state.downloads);
+        let inflight = Arc::clone(&state.scraping);
+        let id = target_id;
+        return tauri::async_runtime::spawn_blocking(move || {
+            if !begin_scrape(&inflight, &id.0) {
+                return Err("该条目正在刮削中".to_string());
+            }
+            let built = (ytdlp_path(), poster_dir(), streams_dir());
+            let outcome = match built {
+                (Ok(ytdlp), Ok(covers), Ok(streams)) => {
+                    let provider = OnlineSiteProvider::new(ytdlp, covers, streams, downloads);
+                    scrape_online_item(store.as_ref(), &provider, &id)
+                }
+                _ => Err("未找到 yt-dlp 或缓存目录不可用".to_string()),
+            };
+            end_scrape(&inflight, &id.0);
+            Ok(match outcome {
+                Ok((comments, screenshots)) => ScrapeResultView {
+                    item_id: id.0.clone(),
+                    state: scrape_state_label(ScrapeState::Done).to_owned(),
+                    comments,
+                    screenshots,
+                    trailer_saved: false,
+                    message: None,
+                },
+                Err(reason) => {
+                    // 构造提供者之前就失败时也要把状态落到界面上
+                    let _ = store.set_scrape_state(&id, ScrapeState::Failed, Some(&reason));
+                    ScrapeResultView {
+                        item_id: id.0.clone(),
+                        state: scrape_state_label(ScrapeState::Failed).to_owned(),
+                        comments: 0,
+                        screenshots: 0,
+                        trailer_saved: false,
+                        message: Some(reason),
+                    }
+                }
+            })
+        })
+        .await
+        .map_err(|e| format!("刮削任务异常中止：{e}"))?;
+    }
+
     let config = {
         let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
         javdb_config_from(&db)
@@ -3281,15 +4605,330 @@ async fn scrape_item(
     .map_err(|e| format!("刮削任务异常中止：{e}"))?
 }
 
+/// 外部元数据补全结果：实际使用的源与本次真正写入的字段。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnrichResultView {
+    /// `javlibrary` | `hanime`；没找到任何数据时为空。
+    source: String,
+    applied: Vec<String>,
+    message: Option<String>,
+}
+
+fn union_values(base: &[String], extra: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = base.to_vec();
+    for value in extra {
+        let text = value.trim();
+        if !text.is_empty() && !out.iter().any(|existing| existing == text) {
+            out.push(text.to_owned());
+        }
+    }
+    out
+}
+
+/// 把一个维度的补全值并入已有标签；没有新值时不写库。
+fn apply_dimension(
+    store: &DbStore,
+    item_id: &ItemId,
+    dimension: &str,
+    label: &str,
+    base: &[String],
+    extra: &[String],
+    applied: &mut Vec<String>,
+) -> std::result::Result<(), String> {
+    if extra.is_empty() {
+        return Ok(());
+    }
+    let merged = union_values(base, extra);
+    if merged.len() == base.len() {
+        return Ok(());
+    }
+    store
+        .replace_metadata_tags(item_id, dimension, &merged)
+        .map_err(|err| err.reason().to_owned())?;
+    applied.push(label.to_owned());
+    Ok(())
+}
+
+/// 用 JavLibrary / hanime.tv 补全条目资料：只填空字段，已有值一律不覆盖。
+///
+/// `source`：`auto`（默认，先 JavLibrary 后 hanime.tv）/ `javlibrary` / `hanime`。
+/// 两个源都不可用或没匹配到时不改库，把原因放在 `message` 里返回。
+#[tauri::command]
+async fn enrich_item(
+    state: State<'_, AppState>,
+    item_id: String,
+    source: Option<String>,
+) -> std::result::Result<EnrichResultView, String> {
+    let mode = match source.as_deref().map(str::trim).unwrap_or("auto") {
+        "javlibrary" => "javlibrary",
+        "hanime" => "hanime",
+        _ => "auto",
+    };
+    let id = ItemId::from(item_id);
+    let (item, existing_shots, tags) = {
+        let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
+        let item = MediaItemRepo::get(db.conn(), &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("条目不存在：{}", id.0))?;
+        let shots = MetadataRepo::screenshots(db.conn(), &id).map_err(|e| e.to_string())?;
+        let tags = ItemTagRepo::of_item(db.conn(), &id).map_err(|e| e.to_string())?;
+        (item, shots, tags)
+    };
+    let store = Arc::clone(&state.store);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let title = item.title.clone();
+        let code = item.external_code.clone().unwrap_or_default();
+        let mut notes: Vec<String> = Vec::new();
+        let mut found: Option<(&'static str, Enrichment)> = None;
+
+        if mode != "hanime" {
+            if code.trim().is_empty() {
+                notes.push("条目没有番号，JavLibrary 无法匹配".to_owned());
+            } else {
+                match enrichment::from_javlibrary(&code) {
+                    Ok(Some(value)) => found = Some(("javlibrary", value)),
+                    Ok(None) => notes.push("JavLibrary 未找到该番号".to_owned()),
+                    Err(err) => notes.push(format!("JavLibrary 查询失败：{}", err.reason())),
+                }
+            }
+        }
+        if found.is_none() && mode != "javlibrary" {
+            match enrichment::from_hanime(&title) {
+                Ok(Some(value)) => found = Some(("hanime", value)),
+                Ok(None) => notes.push("hanime.tv 未匹配到该作品".to_owned()),
+                Err(err) => notes.push(format!("hanime.tv 查询失败：{}", err.reason())),
+            }
+        }
+        let Some((source_name, enrichment)) = found else {
+            return Ok(EnrichResultView {
+                source: String::new(),
+                applied: Vec::new(),
+                message: Some(notes.join("；")),
+            });
+        };
+
+        let mut item = item;
+        let mut applied: Vec<String> = Vec::new();
+        let empty = |value: Option<&str>| value.map(|text| text.trim().is_empty()).unwrap_or(true);
+
+        if empty(item.overview.as_deref()) {
+            if let Some(value) = enrichment
+                .overview
+                .clone()
+                .filter(|text| !text.trim().is_empty())
+            {
+                item.overview = Some(value);
+                applied.push("简介".to_owned());
+            }
+        }
+        if empty(item.release_date.as_deref()) {
+            if let Some(value) = enrichment.release_date.clone() {
+                item.year = value
+                    .get(0..4)
+                    .and_then(|year| year.parse::<i32>().ok())
+                    .or(item.year);
+                item.release_date = Some(value);
+                applied.push("发行日期".to_owned());
+            }
+        }
+        if item.duration_ms.is_none() {
+            if let Some(value) = enrichment.duration_ms {
+                item.duration_ms = Some(value);
+                applied.push("时长".to_owned());
+            }
+        }
+        if item.rating.is_none() {
+            if let Some(value) = enrichment.rating {
+                item.rating = Some(value);
+                applied.push("评分".to_owned());
+            }
+        }
+        if empty(item.external_code.as_deref()) {
+            if let Some(value) = enrichment.external_code.clone() {
+                item.external_code = Some(value);
+                applied.push("番号".to_owned());
+            }
+        }
+        if empty(item.detail_url.as_deref()) {
+            if let Some(value) = enrichment.detail_url.clone() {
+                item.detail_url = Some(value);
+                applied.push("详情链接".to_owned());
+            }
+        }
+        if empty(Some(item.title.as_str())) || item.title.trim() == "未命名" {
+            if let Some(value) = enrichment.title.clone() {
+                item.title = value;
+                applied.push("标题".to_owned());
+            }
+        }
+
+        // 剧照：外部源提供样品图时最多取 3 张；已有截图保留，按地址去重
+        let mut shots = existing_shots;
+        let mut added_shots = 0usize;
+        for (index, url) in enrichment
+            .screenshots
+            .iter()
+            .take(enrichment::MAX_SCREENSHOTS)
+            .enumerate()
+        {
+            if shots
+                .iter()
+                .any(|shot| shot.source_url.as_deref() == Some(url.as_str()))
+            {
+                continue;
+            }
+            let Ok(bytes) = enrichment::fetch_bytes(url) else {
+                continue;
+            };
+            let file_name = format!("{}-enrich{}.jpg", item.id.0, index + 1);
+            if store.write_screenshot(&item.id, &file_name, &bytes).is_ok() {
+                shots.push(ScrapedImage {
+                    file_name,
+                    source_url: Some(url.clone()),
+                });
+                added_shots += 1;
+            }
+        }
+        if added_shots > 0 {
+            store
+                .replace_screenshots(&item.id, &shots)
+                .map_err(|err| err.reason().to_owned())?;
+            applied.push(format!("截图 {added_shots} 张"));
+        }
+
+        let base = |dimension: &str| tags.get(dimension).cloned().unwrap_or_default();
+        apply_dimension(
+            &store,
+            &item.id,
+            DIM_CATEGORY,
+            "类别",
+            &base(DIM_CATEGORY),
+            &enrichment.categories,
+            &mut applied,
+        )?;
+        apply_dimension(
+            &store,
+            &item.id,
+            DIM_SERIES,
+            "系列",
+            &base(DIM_SERIES),
+            &enrichment.series,
+            &mut applied,
+        )?;
+        apply_dimension(
+            &store,
+            &item.id,
+            DIM_MAKER,
+            "制作商",
+            &base(DIM_MAKER),
+            &enrichment.maker,
+            &mut applied,
+        )?;
+        apply_dimension(
+            &store,
+            &item.id,
+            DIM_DIRECTOR,
+            "导演",
+            &base(DIM_DIRECTOR),
+            &enrichment.director,
+            &mut applied,
+        )?;
+        apply_dimension(
+            &store,
+            &item.id,
+            DIM_ACTOR,
+            "演员",
+            &base(DIM_ACTOR),
+            &enrichment.actors,
+            &mut applied,
+        )?;
+        let year_values: Vec<String> =
+            year_label_from(item.release_date.as_deref(), item.year)
+                .into_iter()
+                .collect();
+        apply_dimension(
+            &store,
+            &item.id,
+            DIM_YEAR,
+            "年份",
+            &base(DIM_YEAR),
+            &year_values,
+            &mut applied,
+        )?;
+
+        if applied.is_empty() {
+            return Ok(EnrichResultView {
+                source: source_name.to_owned(),
+                applied,
+                message: Some(if notes.is_empty() {
+                    "没有可补充的新字段".to_owned()
+                } else {
+                    notes.join("；")
+                }),
+            });
+        }
+
+        item.scraped_at = Some(now_ms());
+        item.meta_state = MetaState::Complete;
+        store
+            .save_scraped(&item)
+            .map_err(|err| err.reason().to_owned())?;
+        store
+            .reindex_item(&item.id)
+            .map_err(|err| err.reason().to_owned())?;
+        Ok(EnrichResultView {
+            source: source_name.to_owned(),
+            applied,
+            message: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("补全任务异常中止：{e}"))?
+}
+
+/// 批量补齐的回执：处理数量 + 仍未补齐的缺口，界面据此如实提示。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScrapeBatchView {
+    /// 本轮实际处理（成功或失败都算处理过）的条目数。
+    processed: usize,
+    /// 本轮计划处理的条目数。
+    total: usize,
+    /// 本轮从视频抽帧补过截图的影片数。
+    shots_filled: usize,
+    /// 处理完后仍没有短评的已刮削条目数。
+    comments_missing: usize,
+    /// 数据源是否已登录：短评只有登录后才能抓。
+    logged_in: bool,
+}
+
 /// 批量补齐：刮削 `pending` / `failed` 的条目（可按源限定），逐条上报进度。
+///
+/// - 数据源已登录时，顺手重试「已完成但没有任何短评」的条目；
+/// - 每条处理完都会检查截图，不足 10 张就从本地视频抽帧补满。
 #[tauri::command]
 async fn scrape_missing(
     state: State<'_, AppState>,
     source_id: Option<String>,
-) -> std::result::Result<usize, String> {
-    let config = {
+) -> std::result::Result<ScrapeBatchView, String> {
+    let (config, sources) = {
         let db = state.db.lock().map_err(|_| "数据库锁不可用".to_string())?;
-        javdb_config_from(&db)
+        (
+            javdb_config_from(&db),
+            MediaSourceRepo::list(db.conn()).map_err(|e| e.to_string())?,
+        )
+    };
+    let has_cookie = config.has_cookie();
+    let online_provider = match (ytdlp_path(), poster_dir(), streams_dir()) {
+        (Ok(ytdlp), Ok(covers), Ok(streams)) => Some(Arc::new(OnlineSiteProvider::new(
+            ytdlp,
+            covers,
+            streams,
+            Arc::clone(&state.downloads),
+        ))),
+        _ => None,
     };
     let store = Arc::clone(&state.store);
     let client = Arc::clone(&state.javdb);
@@ -3297,15 +4936,83 @@ async fn scrape_missing(
     let app = state.app.clone();
     let scope = source_id.map(SourceId::from);
     tauri::async_runtime::spawn_blocking(move || {
-        let ids = store
+        // 在线站点源的条目没有番号，番号搜索对它们永远走不通；
+        // 批量补齐时改走详情页路径（与导入后的自动补齐一致）
+        let online_sources: std::collections::HashSet<SourceId> = sources
+            .iter()
+            .filter(|src| src.kind == SourceKind::OnlineSite)
+            .map(|src| src.id.clone())
+            .collect();
+
+        let mut ids = store
             .pending_ids(scope.as_ref())
             .map_err(|e| e.reason().to_owned())?;
+        // 已完成的条目不会再进 pending：手动补齐时单独把「缺短评」的挑出来重试。
+        // 在线源详情页本身带短评（不需要 Cookie）；javdb 源则只有登录后才可能抓到。
+        let mut seen: std::collections::HashSet<String> =
+            ids.iter().map(|id| id.0.clone()).collect();
+        for id in store
+            .ids_done_without_comments(scope.as_ref())
+            .unwrap_or_default()
+        {
+            if seen.contains(&id.0) {
+                continue;
+            }
+            let online = store
+                .item(&id)
+                .map(|item| online_sources.contains(&item.source_id))
+                .unwrap_or(false);
+            if online || has_cookie {
+                seen.insert(id.0.clone());
+                ids.push(id);
+            }
+        }
+
         let total = ids.len();
+        // 先报一次总数：进度条立刻知道总量，不必等第一条处理完才有数字
+        let _ = app.emit(
+            "scrape-progress",
+            ScrapeProgressView {
+                item_id: String::new(),
+                done: 0,
+                total,
+            },
+        );
         let mut done = 0usize;
+        let mut shots_filled = 0usize;
         for (idx, id) in ids.iter().enumerate() {
             if begin_scrape(&inflight, &id.0) {
-                let _ = MetadataService::new(client.as_ref(), store.as_ref())
-                    .scrape_one(id, &config, false);
+                let item = store.item(id).ok();
+                let online = item
+                    .as_ref()
+                    .map(|value| online_sources.contains(&value.source_id))
+                    .unwrap_or(false);
+                // 已完成的条目要重抓短评：必须 force，否则 scrape_one 会直接跳过
+                let force = item
+                    .as_ref()
+                    .map(|value| value.scrape_state == ScrapeState::Done)
+                    .unwrap_or(false);
+                match (online, online_provider.as_ref()) {
+                    (true, Some(provider)) => {
+                        let _ = scrape_online_item(store.as_ref(), provider.as_ref(), id);
+                    }
+                    _ => {
+                        let _ = MetadataService::new(client.as_ref(), store.as_ref())
+                            .scrape_one(id, &config, force);
+                    }
+                }
+                // 截图补足：先读库里已有的，不足 10 张就从本地视频抽帧
+                if let Some(item) = item.as_ref() {
+                    if let Some(source) = sources.iter().find(|src| src.id == item.source_id) {
+                        if let Ok(shots) = store.screenshots(&item.id) {
+                            let (_, added) =
+                                top_up_screenshots(store.as_ref(), item, source, shots);
+                            if added > 0 {
+                                shots_filled += 1;
+                            }
+                        }
+                    }
+                }
                 end_scrape(&inflight, &id.0);
                 done += 1;
             }
@@ -3318,7 +5025,17 @@ async fn scrape_missing(
                 },
             );
         }
-        Ok::<usize, String>(done)
+        let comments_missing = store
+            .ids_done_without_comments(scope.as_ref())
+            .map(|list| list.len())
+            .unwrap_or(0);
+        Ok::<ScrapeBatchView, String>(ScrapeBatchView {
+            processed: done,
+            total,
+            shots_filled,
+            comments_missing,
+            logged_in: has_cookie,
+        })
     })
     .await
     .map_err(|e| format!("批量刮削异常中止：{e}"))?
@@ -3339,6 +5056,23 @@ fn item_detail(
     let comments = MetadataRepo::comments(db.conn(), &id).map_err(|e| e.to_string())?;
     let tags = ItemTagRepo::of_item(db.conn(), &id).map_err(|e| e.to_string())?;
     let group = |dimension: &str| tags.get(dimension).cloned().unwrap_or_default();
+    // 在线站点源才有「下载视频」能力（本地源的文件已经在硬盘上）
+    let online = MediaSourceRepo::get(db.conn(), &item.source_id)
+        .ok()
+        .flatten()
+        .map(|src| src.kind == SourceKind::OnlineSite)
+        .unwrap_or(false);
+    // 已有完整视频文件（≥1MB）时不再提供下载入口，避免重复下载
+    let downloaded = item
+        .detail_url
+        .as_deref()
+        .and_then(online_video_id)
+        .and_then(|video_id| {
+            download_dir()
+                .ok()
+                .and_then(|dir| existing_download(&dir, &video_id))
+        })
+        .is_some();
 
     Ok(ItemDetailView {
         id: item.id.0.clone(),
@@ -3367,6 +5101,8 @@ fn item_detail(
         actors: group(DIM_ACTOR),
         has_trailer: trailer_path(&item).is_some() || item.trailer_url.is_some(),
         trailer_url: item.trailer_url.clone(),
+        online,
+        downloaded,
         scrape_state: scrape_state_label(item.scrape_state).to_owned(),
         scrape_error: item.scrape_error.clone(),
     })
@@ -3390,6 +5126,119 @@ fn item_screenshot(
     }
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     Ok(image_data_url(&bytes))
+}
+
+/// 详情页截图的目标张数：不足时从视频里按随机时间抽帧补满。
+const DETAIL_SHOTS_TARGET: usize = 10;
+
+/// 详情页截图补足：不足 [`DETAIL_SHOTS_TARGET`] 张时，从视频文件按随机时间抽帧，
+/// 按时间升序追加。没有可读的视频文件（在线源尚未下载完）时原样返回。
+#[tauri::command]
+async fn fill_screenshots(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> std::result::Result<Vec<String>, String> {
+    let (item, source) = load_item(&state, &item_id)?;
+    let store = Arc::clone(&state.store);
+    let shots = store
+        .screenshots(&item.id)
+        .map_err(|err| err.reason().to_owned())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (all, _) = top_up_screenshots(store.as_ref(), &item, &source, shots);
+        Ok(all.into_iter().map(|shot| shot.file_name).collect())
+    })
+    .await
+    .map_err(|e| format!("补足截图任务异常中止：{e}"))?
+}
+
+/// 截图补足（详情页与批量维护共用）：不足 10 张时按随机时间从视频抽帧。
+///
+/// 返回补完后的截图列表与本轮新增张数；没有视频文件 / 读不到时长时原样返回。
+fn top_up_screenshots(
+    store: &DbStore,
+    item: &MediaItem,
+    source: &MediaSource,
+    shots: Vec<ScrapedImage>,
+) -> (Vec<ScrapedImage>, usize) {
+    if shots.len() >= DETAIL_SHOTS_TARGET {
+        return (shots, 0);
+    }
+    let Some(video) = item_video_file(item, source) else {
+        return (shots, 0);
+    };
+    let Some(duration_ms) = item.duration_ms.filter(|ms| *ms > 0).or_else(|| {
+        MpvProber::new()
+            .ok()
+            .and_then(|prober| prober.probe(video.to_string_lossy().as_ref()).ok())
+            .and_then(|facts| facts.duration_ms)
+    }) else {
+        return (shots, 0);
+    };
+    let need = DETAIL_SHOTS_TARGET - shots.len();
+    let times = thumbs::random_times(duration_ms as f64 / 1000.0, need);
+    if times.is_empty() {
+        return (shots, 0);
+    }
+
+    let mut all = shots;
+    let mut added = 0usize;
+    for (index, secs) in times.iter().enumerate() {
+        // 每帧独占一个临时目录：mpv 的 image 输出文件名固定，共用会互相覆盖
+        let work = std::env::temp_dir().join(format!(
+            "cinema-frame-{}-{}-{}",
+            std::process::id(),
+            index,
+            item.id.0
+        ));
+        let _ = std::fs::remove_dir_all(&work);
+        let bytes = thumbs::extract_frame(&video, *secs, &work)
+            .ok()
+            .and_then(|path| std::fs::read(path).ok());
+        let _ = std::fs::remove_dir_all(&work);
+        let Some(bytes) = bytes else {
+            continue;
+        };
+        let file_name = format!("{}-t{:08}.jpg", item.id.0, (*secs * 1000.0).round() as i64);
+        if store.write_screenshot(&item.id, &file_name, &bytes).is_ok() {
+            all.push(ScrapedImage {
+                file_name,
+                source_url: None,
+            });
+            added += 1;
+        }
+    }
+    if added > 0 {
+        let _ = store.replace_screenshots(&item.id, &all);
+    }
+    (all, added)
+}
+
+/// 该条目真正可读的视频文件：本地源按相对路径还原，在线源只认已下载完成的文件。
+fn item_video_file(item: &MediaItem, source: &MediaSource) -> Option<PathBuf> {
+    if source.kind == SourceKind::OnlineSite {
+        let url = item
+            .detail_url
+            .as_deref()
+            .or(item.url.as_deref())
+            .map(str::trim)
+            .filter(|url| !url.is_empty())?;
+        let video_id = online_video_id(url)?;
+        return download_dir()
+            .ok()
+            .and_then(|dir| existing_download(&dir, &video_id))
+            .filter(|path| path.is_file());
+    }
+
+    let rel = item.rel_path.as_deref()?;
+    let rel_path = PathBuf::from(rel);
+    let path = if rel_path.is_absolute() {
+        rel_path
+    } else if source.kind == SourceKind::LanPath {
+        PathBuf::from(normalized_lan_root(&source.location)).join(rel_path)
+    } else {
+        PathBuf::from(&source.location).join(rel_path)
+    };
+    path.is_file().then_some(path)
 }
 
 /// 从详情页地址取出 javdb 的 uid（`/v/<uid>`），用于播放前重新解析预告片。
@@ -3536,13 +5385,20 @@ fn main() {
                 .ok_or("主窗口 main 未创建")?;
             let parent = window.hwnd().map_err(|e| e.to_string())?.0 as i64;
 
-            let data_dir = data_dir()?;
+            // 存储目录：先解析并完成待迁移的元数据，再打开数据库（避免复制正在使用的库）
+            let data_dir = init_storage()?;
             let db = Database::open(data_dir.join("cinema.db")).map_err(|e| e.to_string())?;
             let version = db.migrate().map_err(|e| e.to_string())?;
 
             // 播种内置标签维度：幂等，已存在的 id 不覆盖（用户改过的配置优先）
             DimensionRepo::seed(db.conn(), &TagDimensionDef::builtin_defaults())
                 .map_err(|e| e.to_string())?;
+            // 历史库补写年份标签：有年份 / 发行日期但还没有「年份」取值的条目
+            match store::backfill_year_tags(&db) {
+                Ok(0) => {}
+                Ok(count) => println!("[标签] 已补齐 {count} 个条目的年份标签"),
+                Err(err) => eprintln!("[标签] 年份标签补齐失败：{err}"),
+            }
 
             println!("[M2] 数据库 = {}（schema v{version}）", data_dir.display());
 
@@ -3595,6 +5451,7 @@ fn main() {
                 subtitles: Mutex::new(subtitle::SubtitleRuntime::new()),
                 downloads: Arc::new(DownloadRegistry::new()),
                 covers_inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                online_downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 // 与本次会话的扫描一一对应；`scan_source` 每次开跑都会先清零
                 scan_cancel: Arc::new(AtomicBool::new(false)),
                 javdb: Arc::new(JavdbProvider::new()),
@@ -3700,6 +5557,8 @@ fn main() {
             tick,
             set_paused,
             seek,
+            set_volume,
+            player_volume,
             close_player,
             set_player_reserve,
             player_video_aspect,
@@ -3716,15 +5575,23 @@ fn main() {
             set_console_fullscreen,
             ui_constants,
             library_stats,
+            storage_settings,
+            save_storage_settings,
+            restart_app,
             javdb_settings,
             save_javdb_settings,
             llm_settings,
             save_llm_settings,
             recommend_highlights,
+            enrich_item,
             scrape_item,
             scrape_missing,
+            start_online_download,
+            download_online_source,
+            online_download_status,
             item_detail,
             item_screenshot,
+            fill_screenshots,
             play_trailer,
             trailer_status,
             trailer_seek,

@@ -52,6 +52,27 @@ fn item_id_for(stable_key: &str) -> ItemId {
     ItemId(format!("it-{hash:016x}"))
 }
 
+/// 启动时补齐年份标签（幂等）：为有年份信息、但 `year` 维度还没有标签的条目
+/// 写入 `2015年` 形式的取值。覆盖历史库与「写入逻辑上线前」的条目。
+///
+/// 返回本次补写标签的条目数。
+pub fn backfill_year_tags(db: &Database) -> Result<usize> {
+    let conn = db.conn();
+    let dimension = cinema_domain::tagging::DIM_YEAR;
+    let rows = MediaItemRepo::items_missing_year_tag(conn, dimension).map_err(port_err)?;
+    let mut count = 0usize;
+    for (id, year, release_date) in rows {
+        let Some(label) = cinema_domain::tagging::year_label_from(release_date.as_deref(), year)
+        else {
+            continue;
+        };
+        ItemTagRepo::replace_metadata(conn, &id, dimension, &[label]).map_err(port_err)?;
+        SearchIndexRepo::reindex_item(conn, &id).map_err(port_err)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// SQLite 支撑的入库 / 进度仓储。
 pub struct DbStore {
     db: Arc<Mutex<Database>>,
@@ -71,6 +92,18 @@ impl DbStore {
             .lock()
             .map_err(|_| PortError::Backend("数据库锁不可用".into()))?;
         f(&guard)
+    }
+
+    /// 已刮削完成但没有短评的条目（手动补齐时重试短评用）。
+    pub fn ids_done_without_comments(&self, source_id: Option<&SourceId>) -> Result<Vec<ItemId>> {
+        self.with(|db| {
+            MediaItemRepo::ids_done_without_comments(db.conn(), source_id).map_err(port_err)
+        })
+    }
+
+    /// 条目当前已入库的截图列表（补足抽帧前先读一次，避免覆盖已有图）。
+    pub fn screenshots(&self, id: &ItemId) -> Result<Vec<ScrapedImage>> {
+        self.with(|db| MetadataRepo::screenshots(db.conn(), id).map_err(port_err))
     }
 }
 

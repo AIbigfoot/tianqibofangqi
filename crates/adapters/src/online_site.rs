@@ -45,7 +45,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -54,7 +54,8 @@ use std::time::{Duration, Instant};
 
 use cinema_domain::error::{PortError, Result};
 use cinema_domain::model::{
-    DiscoverStat, DiscoveredItem, MediaItem, MediaSource, PlayableRef, SourceKind, StreamFacts,
+    DiscoverStat, DiscoveredItem, MediaItem, MediaSource, PlayableRef, ScrapedComment, SourceKind,
+    StreamFacts,
 };
 use cinema_domain::ports::media_source::{DiscoverSink, MediaSourceProvider};
 
@@ -437,6 +438,23 @@ pub struct OnlineSiteProvider {
     runner: Arc<dyn ProcessRunner>,
 }
 
+/// 详情页抓取结果（只含站点字段，文件落盘由组合根负责）。
+///
+/// 列表页只给标题与详情页地址；作者 / 类别 / 标签 / 简介 / 时长 / 发行日期 / 番号
+/// 都要从详情页补齐。截图恒为一张（站点只有 `og:image` 那张视频帧，没有多图库）。
+pub struct OnlineDetail {
+    pub title: String,
+    pub overview: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub release_date: Option<String>,
+    pub author: Option<String>,
+    pub categories: Vec<String>,
+    pub tags: Vec<String>,
+    pub external_code: Option<String>,
+    pub frame_url: Option<String>,
+    pub comments: Vec<ScrapedComment>,
+}
+
 impl OnlineSiteProvider {
     /// 以真实子进程运行器创建提供者。
     pub fn new(
@@ -527,6 +545,248 @@ impl OnlineSiteProvider {
         }
     }
 
+    /// 抓一张详情页：字段解析 + 评论（评论失败不影响字段）。
+    ///
+    /// 页面抓取与列表页走同一条路（`--write-pages` 落盘再读），因为目标站点
+    /// 同样需要 yt-dlp 的指纹伪装才不会被 403。
+    pub fn scrape_detail(&self, detail_url: &str) -> Result<OnlineDetail> {
+        let html = self.fetch_page_html(detail_url).map_err(|err| {
+            PortError::Backend(format!(
+                "未能获取详情页内容：{detail_url}（{}）",
+                err.reason()
+            ))
+        })?;
+        let mut detail = parse_detail(&html, detail_url);
+        // 评论是 AJAX 端点，失败时保留空列表：评论缺失不该让整条详情失败
+        if let Some(comments_html) = self.load_comments_html(detail_url) {
+            detail.comments = parse_comments(&comments_html);
+        }
+        Ok(detail)
+    }
+
+    /// 下载一张图片直链并读回字节，校验确实是 JPEG；否则返回错误。
+    ///
+    /// 与封面同理走 yt-dlp 指纹伪装（图片在走 CDN 且带 `secure` 令牌，普通请求会被挡）。
+    /// 落盘位置是临时目录，读完即清，不污染截图目录——真正落盘由组合根完成。
+    pub fn fetch_image_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let dir = unique_temp_dir("cinema-image");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| PortError::Backend(format!("建截图临时目录失败：{e}")))?;
+        let target = dir.join("img.%(ext)s");
+        let args = vec![
+            "--impersonate".to_owned(),
+            "chrome".to_owned(),
+            "--no-warnings".to_owned(),
+            "--ignore-config".to_owned(),
+            "--no-playlist".to_owned(),
+            "-o".to_owned(),
+            target.to_string_lossy().into_owned(),
+            url.to_owned(),
+        ];
+        // 有意忽略退出码：非零退出时文件也常已落盘，以文件内容为准
+        let _ = self.runner.run(&self.ytdlp, &args, Some(&dir));
+        let bytes = read_named_dump(&dir, "img.");
+        let _ = std::fs::remove_dir_all(&dir);
+        match bytes {
+            Some(bytes) if bytes.starts_with(&[0xff, 0xd8, 0xff]) => Ok(bytes),
+            _ => Err(PortError::Backend(format!("未能下载截图：{url}"))),
+        }
+    }
+
+    /// 把一条详情页的影片**完整下载**到 `dir`，边下边回报进度（0–100）。
+    ///
+    /// 与边下边播用的 `start_download` 不同：这里同步等到下载结束（在后台线程里调用），
+    /// 并按用户设置的视频下载目录落盘；最终文件名由 yt-dlp 依站点标题生成，
+    /// `--print after_move:filepath` 让它把**最终路径**打印到 stdout，避免再猜文件名。
+    pub fn download_to_dir<F>(&self, detail_url: &str, dir: &Path, mut on_progress: F) -> Result<PathBuf>
+    where
+        F: FnMut(f64),
+    {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| PortError::Backend(format!("建视频下载目录失败：{e}")))?;
+        let args = vec![
+            "--impersonate".to_owned(),
+            "chrome".to_owned(),
+            "--no-warnings".to_owned(),
+            "--ignore-config".to_owned(),
+            "--no-playlist".to_owned(),
+            // 逐行输出进度（`[download]  12.3% ...`），否则进度会以 `\r` 原地刷新
+            "--newline".to_owned(),
+            // `--print` 会隐含 quiet，这里显式保留进度行
+            "--progress".to_owned(),
+            "--no-simulate".to_owned(),
+            "--continue".to_owned(),
+            "--windows-filenames".to_owned(),
+            "--print".to_owned(),
+            "after_move:filepath".to_owned(),
+            "-P".to_owned(),
+            dir.to_string_lossy().into_owned(),
+            "-o".to_owned(),
+            "%(title).80B [%(id)s].%(ext)s".to_owned(),
+            detail_url.to_owned(),
+        ];
+
+        let mut command = Command::new(&self.ytdlp);
+        command
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                PortError::Backend(format!("未找到可执行文件: {}", self.ytdlp.display()))
+            } else {
+                PortError::Backend(format!("启动下载进程失败: {e}"))
+            }
+        })?;
+
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| PortError::Backend("下载进程 stderr 不可用".into()))?;
+        // stderr 必须在独立线程里读干：yt-dlp 的日志量大，写满管道会把下载卡死
+        let err_thread = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut pipe = stderr;
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        });
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| PortError::Backend("下载进程 stdout 不可用".into()))?;
+        let mut final_path: Option<PathBuf> = None;
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if let Some(percent) = parse_progress_percent(&line) {
+                on_progress(percent);
+                continue;
+            }
+            // `after_move:filepath` 打印的就是最终文件路径（绝对路径）
+            if line.starts_with(['/', '\\']) || line.contains(":\\") {
+                final_path = Some(PathBuf::from(line.trim()));
+            }
+        }
+        let status = child
+            .wait()
+            .map_err(|e| PortError::Backend(format!("等待下载进程失败：{e}")))?;
+        let stderr_text = err_thread.join().unwrap_or_default();
+        let stderr_text = String::from_utf8_lossy(&stderr_text).into_owned();
+
+        if !status.success() {
+            let tail: String = stderr_text
+                .lines()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" | ");
+            return Err(PortError::Backend(format!(
+                "yt-dlp 下载失败（退出码 {:?}）：{tail}",
+                status.code()
+            )));
+        }
+        if let Some(path) = final_path.filter(|path| path.is_file()) {
+            return Ok(path);
+        }
+        // 兜底：yt-dlp 没有打印路径时，取目录里最新的视频文件
+        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()).map(|ext| {
+                matches!(ext.to_ascii_lowercase().as_str(), "mp4" | "mkv" | "webm" | "avi")
+            }) != Some(true)
+            {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if newest.as_ref().map(|(time, _)| modified > *time).unwrap_or(true) {
+                newest = Some((modified, path));
+            }
+        }
+        newest
+            .map(|(_, path)| path)
+            .ok_or_else(|| PortError::Backend("下载结束但未找到落盘的视频文件".into()))
+    }
+
+    /// 抓 `/loadComment` 的 JSON，取出 `comments` 字段里的 HTML。
+    ///
+    /// 该地址直接 HTTP 请求会 403，因此仍交给 yt-dlp 当直链下载（**不能加
+    /// `--skip-download`**，否则不会落盘内容）。任何失败都返回 `None`。
+    fn load_comments_html(&self, detail_url: &str) -> Option<String> {
+        let id = video_id(detail_url)?;
+        let origin = url_origin(detail_url);
+        if origin.is_empty() {
+            return None;
+        }
+        let url = format!("{origin}/loadComment?id={id}&type=video&content=comment-tablink");
+        let dir = unique_temp_dir("cinema-comments");
+        std::fs::create_dir_all(&dir).ok()?;
+        let target = dir.join("comments.%(ext)s");
+        let args = vec![
+            "--impersonate".to_owned(),
+            "chrome".to_owned(),
+            "--no-warnings".to_owned(),
+            "--ignore-config".to_owned(),
+            "--no-playlist".to_owned(),
+            "-o".to_owned(),
+            target.to_string_lossy().into_owned(),
+            url,
+        ];
+        let _ = self.runner.run(&self.ytdlp, &args, Some(&dir));
+        let bytes = read_named_dump(&dir, "comments.");
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8_lossy(&bytes?).into_owned();
+        let json = parse_json(&text).ok()?;
+        json.get("comments")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    }
+
+    /// 抓一页 HTML：`--write-pages` 落盘后读回内容，失败时删除临时目录。
+    ///
+    /// 列表页与详情页共用：目标站点的页面都只能经 yt-dlp（带指纹伪装）拿到。
+    fn fetch_page_html(&self, url: &str) -> Result<String> {
+        let dir = unique_temp_dir("cinema-page");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| PortError::Backend(format!("建页面临时目录失败：{e}")))?;
+
+        let args = vec![
+            "--impersonate".to_owned(),
+            "chrome".to_owned(),
+            "--no-warnings".to_owned(),
+            "--ignore-config".to_owned(),
+            "--skip-download".to_owned(),
+            "--no-playlist".to_owned(),
+            "--write-pages".to_owned(),
+            url.to_owned(),
+        ];
+        let outcome = self.runner.run(&self.ytdlp, &args, Some(&dir));
+        let html = read_page_dump(&dir);
+        // 页面已读进内存，临时目录不再需要
+        let _ = std::fs::remove_dir_all(&dir);
+
+        match html {
+            Some(html) => Ok(html),
+            // 连页面都没拿到：此时子进程的错误才是真正的原因（缺 yt-dlp、网络不可达等）
+            None => Err(outcome.err().unwrap_or_else(|| {
+                PortError::Backend(format!("未能获取页面内容：{url}"))
+            })),
+        }
+    }
+
     /// 起一个分离下载：把详情页对应的影片写到 `target`，立刻返回。
     fn start_download(&self, detail: &str, target: &Path) -> Result<()> {
         if let Some(dir) = target.parent() {
@@ -591,34 +851,9 @@ impl OnlineSiteProvider {
     /// extractor（yt-dlp 随后以「Unsupported URL」非零退出），页面也已经落盘，
     /// 因此**不把非零退出当成失败**，而是以「有没有页面文件」为准。
     fn listing_cards(&self, location: &str) -> Result<Vec<ListingCard>> {
-        let dir = unique_temp_dir("cinema-listing");
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| PortError::Backend(format!("建列表页临时目录失败：{e}")))?;
-
-        let args = vec![
-            "--impersonate".to_owned(),
-            "chrome".to_owned(),
-            "--no-warnings".to_owned(),
-            "--ignore-config".to_owned(),
-            "--skip-download".to_owned(),
-            "--no-playlist".to_owned(),
-            "--write-pages".to_owned(),
-            location.to_owned(),
-        ];
-        let outcome = self.runner.run(&self.ytdlp, &args, Some(&dir));
-        let html = read_page_dump(&dir);
-        // 页面已读进内存，临时目录不再需要
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let html = match html {
-            Some(html) => html,
-            // 连页面都没拿到：此时子进程的错误才是真正的原因（缺 yt-dlp、网络不可达等）
-            None => {
-                return Err(outcome.err().unwrap_or_else(|| {
-                    PortError::Backend(format!("未能获取列表页内容：{location}"))
-                }))
-            }
-        };
+        let html = self.fetch_page_html(location).map_err(|err| {
+            PortError::Backend(format!("未能获取列表页内容：{location}（{}）", err.reason()))
+        })?;
         Ok(parse_cards(&html, location))
     }
 }
@@ -1011,6 +1246,338 @@ fn jpeg_at(path: &Path) -> bool {
     };
     let mut head = [0u8; 3];
     file.read_exact(&mut head).is_ok() && head == [0xff, 0xd8, 0xff]
+}
+
+/// 读取目录中文件名以 `prefix` 开头、体积最大的文件内容。
+///
+/// yt-dlp 的 `-o` 用 `%(ext)s` 时真实扩展名由响应头决定（可能是 `.unknown_video`），
+/// 无法预先知道，因此按前缀筛选；`.part` / `.ytdl` 是未完成的中间文件，跳过。
+fn read_named_dump(dir: &Path, prefix: &str) -> Option<Vec<u8>> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<(u64, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(prefix) || name.ends_with(".part") || name.ends_with(".ytdl") {
+            continue;
+        }
+        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        if best.as_ref().map(|(best_size, _)| size > *best_size).unwrap_or(true) {
+            best = Some((size, entry.path()));
+        }
+    }
+    let (_, path) = best?;
+    std::fs::read(&path).ok()
+}
+
+// ---------------------------------------------------------------------------
+// 详情页解析（纯字符串处理，不引入 HTML 解析依赖）
+// ---------------------------------------------------------------------------
+
+/// 从 yt-dlp 的 `[download]  12.3% of ...` 行里取百分比。
+fn parse_progress_percent(line: &str) -> Option<f64> {
+    let rest = line.strip_prefix("[download]")?.trim_start();
+    let head = rest.split('%').next()?;
+    head.trim().parse::<f64>().ok()
+}
+
+/// 从详情页 HTML 解析出站点字段。
+///
+/// 判定规则与列表页解析一致：只认结构稳定的标记（`id` / `property` / `class`），
+/// 拿不准就留空，宁可少字段也不要塞进错误内容。
+fn parse_detail(html: &str, detail_url: &str) -> OnlineDetail {
+    // 参数目前只用于调用方日志；标题为空时保留空串，交由组合根决定是否回退
+    let _ = detail_url;
+
+    let title = text_of_element(html, "id=\"shareBtn-title\"", "</h3")
+        .map(|raw| clean_text(&raw))
+        .unwrap_or_default();
+
+    let overview = meta_content(html, "og:description").filter(|text| !text.is_empty());
+    let duration_ms = meta_content(html, "og:video:duration")
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .map(|secs| secs.saturating_mul(1000));
+    let frame_url = meta_content(html, "og:image").filter(|text| !text.is_empty());
+
+    // 发行日期只在标题之后的统计行里找，避免误取简介里提到的日期
+    let after_title = html
+        .find("id=\"shareBtn-title\"")
+        .and_then(|at| html[at..].find("</h3").map(|rel| at + rel))
+        .unwrap_or(0);
+    let stats: String = html[after_title..].chars().take(2000).collect();
+    let release_date = find_date(&stats);
+
+    let author = text_of_element(html, "id=\"video-artist-name\"", "</a")
+        .map(|raw| clean_text(&raw))
+        .filter(|text| !text.is_empty());
+
+    // 类别：作者锚点之后 1500 字符内的 genre 链接（作者链接本身带 query=，排除）
+    let categories = html
+        .find("id=\"video-artist-name\"")
+        .and_then(|at| html[at..].find("</a").map(|rel| at + rel + "</a".len()))
+        .map(|start| {
+            let window: String = html[start..].chars().take(1500).collect();
+            let mut values: Vec<String> = Vec::new();
+            for (href, raw) in anchors_in(&window) {
+                let href = decode_entities(&href);
+                if !href.contains("search?genre=") || href.contains("query=") {
+                    continue;
+                }
+                let text = clean_text(&raw);
+                if text.is_empty() || values.contains(&text) {
+                    continue;
+                }
+                values.push(text);
+                if values.len() >= 5 {
+                    break;
+                }
+            }
+            values
+        })
+        .unwrap_or_default();
+
+    let tags = parse_tags(html);
+    let external_code = bracket_code(&title);
+
+    OnlineDetail {
+        title,
+        overview,
+        duration_ms,
+        release_date,
+        author,
+        categories,
+        tags,
+        external_code,
+        frame_url,
+        comments: Vec::new(),
+    }
+}
+
+/// 解析评论 HTML（`/loadComment` 返回的 `comments` 字段）。
+///
+/// 每条评论以 `report-btn-wrapper` 的 `<div>` 起始；块内第一个锚点是作者，
+/// 第一个 `comment-index-text` 里取时间，第二个才是正文。表单块没有该标记，
+/// 因此自然不会进入结果；正文为空的块（点赞 / 举报等装饰块）也跳过。最多 10 条。
+fn parse_comments(html: &str) -> Vec<ScrapedComment> {
+    const MARKER: &str = "report-btn-wrapper";
+    let mut comments: Vec<ScrapedComment> = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some(at) = find_from(html, cursor, MARKER) {
+        let Some(tag_end) = html[at..].find('>').map(|rel| at + rel) else {
+            break;
+        };
+        let block_start = tag_end + 1;
+        let block_end = find_from(html, block_start, MARKER).unwrap_or(html.len());
+        cursor = block_end;
+        let block = &html[block_start..block_end];
+
+        let author = anchors_in(block)
+            .into_iter()
+            .next()
+            .map(|(_, raw)| {
+                // 作者锚点里还套着时间 `<span>`，作者名只到它之前
+                let part = match raw.find("<span") {
+                    Some(span) => &raw[..span],
+                    None => &raw,
+                };
+                clean_text(part)
+            })
+            .filter(|text| !text.is_empty());
+
+        let first_meta = find_from(block, 0, "class=\"comment-index-text\"");
+        let posted_at = first_meta.and_then(|at| {
+            let tag_end = at + block[at..].find('>')?;
+            let inner_end = tag_end + block[tag_end..].find("</div>")?;
+            let inner = &block[tag_end + 1..inner_end];
+            let span_at = inner.find("<span")?;
+            let span_tag_end = span_at + inner[span_at..].find('>')?;
+            let span_end = span_tag_end + inner[span_tag_end..].find("</span>")?;
+            let text = clean_text(&inner[span_tag_end + 1..span_end]);
+            (!text.is_empty()).then_some(text)
+        });
+
+        let content = first_meta
+            .and_then(|at| find_from(block, at + 1, "class=\"comment-index-text\""))
+            .and_then(|at| {
+                let tag_end = at + block[at..].find('>')?;
+                let inner_end = tag_end + block[tag_end..].find("</div>")?;
+                Some(clean_text(&block[tag_end + 1..inner_end]))
+            })
+            .unwrap_or_default();
+        if content.is_empty() {
+            continue; // 没有正文的块（表单 / 装饰）不算评论
+        }
+
+        comments.push(ScrapedComment {
+            author,
+            score: None,
+            content,
+            likes: 0, // 站点不提供点赞数
+            posted_at,
+        });
+        if comments.len() >= 10 {
+            break;
+        }
+    }
+    comments
+}
+
+/// 取 `<div class="single-video-tag">` 块内首个锚点的文本（截到 `<span` 前）。
+fn parse_tags(html: &str) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(at) = find_from(html, cursor, "class=\"single-video-tag\"") {
+        let Some(open) = find_from(html, at, "<a") else {
+            break;
+        };
+        let Some(tag_len) = html[open..].find('>') else {
+            break;
+        };
+        let tag_end = open + tag_len;
+        let Some(close_len) = html[tag_end..].find("</a>") else {
+            break;
+        };
+        let inner = &html[tag_end + 1..tag_end + close_len];
+        cursor = tag_end + close_len + "</a>".len();
+        // 站点在标签文本后附带计数 `<span>(1)</span>`，它不是标签本身
+        let text_part = match inner.find("<span") {
+            Some(span) => &inner[..span],
+            None => inner,
+        };
+        let text = clean_text(text_part);
+        if !text.is_empty() && !tags.contains(&text) {
+            tags.push(text);
+            if tags.len() >= 20 {
+                break;
+            }
+        }
+    }
+    tags
+}
+
+/// 从标题的 `[...]` 里取番号：长度 2..=20 且只含字母 / 数字 / `_` / `-`。
+fn bracket_code(title: &str) -> Option<String> {
+    let mut from = 0usize;
+    while let Some(open) = find_from(title, from, "[") {
+        let rest = &title[open + 1..];
+        let Some(close) = rest.find(']') else {
+            break;
+        };
+        let inner = rest[..close].trim();
+        let count = inner.chars().count();
+        if (2..=20).contains(&count)
+            && inner
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return Some(inner.to_owned());
+        }
+        from = open + 1;
+    }
+    None
+}
+
+/// 取 HTML 中某个标记（如 `id="x"`）所在元素的文本。
+///
+/// `close` 是结束标签的前缀（如 `</h3`）：元素内部的嵌套标签由 [`strip_tags`]
+/// 一并剥掉，因此不必真正匹配 DOM。
+fn text_of_element(html: &str, marker: &str, close: &str) -> Option<String> {
+    let at = html.find(marker)?;
+    let tag_end = at + html[at..].find('>')?;
+    let rest = &html[tag_end + 1..];
+    let end = rest.find(close)?;
+    Some(rest[..end].to_owned())
+}
+
+/// 取 `<meta>` 的 `content`（按 `property` / `name` 的取值定位）。
+fn meta_content(html: &str, key: &str) -> Option<String> {
+    let at = html.find(key)?;
+    let start = html[..at].rfind("<meta")?;
+    let end = start + html[start..].find('>')?;
+    attr_value(&html[start..=end], "content").map(|value| decode_entities(value.trim()))
+}
+
+/// 取片段中所有 `<a>` 的（原始 href，**原始 inner HTML**）。
+///
+/// 文本清洗由调用方负责：作者锚点要截掉后面的 `<span>` 时间，类别锚点则整段清洗。
+fn anchors_in(segment: &str) -> Vec<(String, String)> {
+    let mut anchors = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(open) = find_from(segment, cursor, "<a") {
+        let is_anchor = segment[open + 2..]
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace() || c == '>')
+            .unwrap_or(false);
+        if !is_anchor {
+            cursor = open + 2;
+            continue;
+        }
+        let Some(tag_len) = segment[open..].find('>') else {
+            break;
+        };
+        let tag_end = open + tag_len;
+        let Some(close_len) = segment[tag_end..].find("</a>") else {
+            break;
+        };
+        let inner = &segment[tag_end + 1..tag_end + close_len];
+        cursor = tag_end + close_len + "</a>".len();
+        let href = attr_value(&segment[open..tag_end], "href").unwrap_or_default();
+        anchors.push((href, inner.to_owned()));
+    }
+    anchors
+}
+
+/// 取文本里的第一个 `YYYY-MM-DD` 日期。
+fn find_date(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 {
+        return None;
+    }
+    for index in 0..=bytes.len() - 10 {
+        let window = &bytes[index..index + 10];
+        if window[4] == b'-'
+            && window[7] == b'-'
+            && window[..4].iter().all(u8::is_ascii_digit)
+            && window[5..7].iter().all(u8::is_ascii_digit)
+            && window[8..].iter().all(u8::is_ascii_digit)
+        {
+            return text.get(index..index + 10).map(str::to_owned);
+        }
+    }
+    None
+}
+
+/// 去掉 `<...>` 标签。刻意在解码实体**之前**做：正文里的 `&lt;` 解码后会变成
+/// `<`，那时再剥就会误吞正文。
+fn strip_tags(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_tag = false;
+    for ch in raw.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// 元素文本的公共清洗：去标签 → 解实体 → 去首尾空白。
+fn clean_text(raw: &str) -> String {
+    let stripped = strip_tags(raw);
+    decode_entities(&stripped).trim().to_owned()
+}
+
+/// 从详情页地址里取视频 id（`v=NNNNN` 的数字部分）。
+fn video_id(url: &str) -> Option<String> {
+    let at = url.find("v=")?;
+    let digits: String = url[at + 2..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    (!digits.is_empty()).then_some(digits)
 }
 
 // ---------------------------------------------------------------------------
@@ -1728,6 +2295,133 @@ mod tests {
         assert!(
             !covers.join("online-bad.jpg").exists(),
             "非 JPEG 的半成品必须被删除，避免界面出现破图"
+        );
+    }
+
+    /// 真实详情页的结构（按勘察结论合成，不联网）。
+    const DETAIL_HTML: &str = r#"
+      <html><head>
+      <meta property="og:video:duration" content="1257">
+      <meta property="og:description" content="簡介：少女 &amp; 汽水 &lt;第2話&gt; &quot;特別版&quot;">
+      <meta property="og:image" content="https://cdn.test/image/thumbnail/408309h.jpg?secure=xyz">
+      </head><body>
+      <h3 id="shareBtn-title" class="video-details-wrapper" style="margin:0">少女&nbsp;彈珠汽水 [ABC-123] [Queen Bee]</h3>
+      <div class="video-details-wrapper hidden-sm hidden-md hidden-lg hidden-xl" style="margin:0">觀看次數：105.9萬次&nbsp;&nbsp;2026-10-16</div>
+      <a id="video-artist-name" style="color:#fff" href="https://site.test/search?query=Queen Bee&amp;genre=x">Queen Bee</a>
+      <a href="https://site.test/search?genre=x">裏番</a>
+      <a href="https://site.test/search?genre=y">裏番</a>
+      <a href="https://site.test/search?genre=z">3D</a>
+      <div class="video-buttons-wrapper">
+      <a href="https://site.test/search?genre=w">4D</a>
+      </div>
+      <div class="single-video-tag" style="display:inline"><a href="/search?tags%5B%5D=NTR&amp;genre=x">NTR&nbsp;<span style="color:#aaa">(1)</span></a></div>
+      <div class="single-video-tag" style="display:inline"><a href="/search?tags%5B%5D=NTR&amp;genre=x">NTR&nbsp;<span style="color:#aaa">(2)</span></a></div>
+      <div class="single-video-tag" style="display:inline"><a href="/search?tags%5B%5D=%E7%B4%94%E6%84%9B&amp;genre=x">純愛&nbsp;<span style="color:#aaa">(1)</span></a></div>
+      <span id="tab-comments-count">60</span>
+      </body></html>
+    "#;
+
+    #[test]
+    fn parse_detail_reads_all_site_fields_from_the_real_page_shape() {
+        let detail = parse_detail(DETAIL_HTML, "https://site.test/watch?v=408309");
+
+        assert_eq!(
+            detail.title, "少女 彈珠汽水 [ABC-123] [Queen Bee]",
+            "标题应取自 shareBtn-title 并解实体、去空白"
+        );
+        assert_eq!(
+            detail.overview.as_deref(),
+            Some("簡介：少女 & 汽水 <第2話> \"特別版\""),
+            "简介应取自 og:description 并解实体"
+        );
+        assert_eq!(detail.duration_ms, Some(1_257_000), "时长应按秒 × 1000");
+        assert_eq!(detail.release_date.as_deref(), Some("2026-10-16"), "只取日期");
+        assert_eq!(detail.author.as_deref(), Some("Queen Bee"));
+        assert_eq!(
+            detail.categories,
+            vec!["裏番".to_owned(), "3D".to_owned(), "4D".to_owned()],
+            "类别应取 genre 链接文本并去重、排除 query= 的作者链接"
+        );
+        assert_eq!(
+            detail.tags,
+            vec!["NTR".to_owned(), "純愛".to_owned()],
+            "标签应截到 <span> 前并去重"
+        );
+        assert_eq!(detail.external_code.as_deref(), Some("ABC-123"));
+        assert_eq!(
+            detail.frame_url.as_deref(),
+            Some("https://cdn.test/image/thumbnail/408309h.jpg?secure=xyz")
+        );
+        assert!(detail.comments.is_empty(), "parse_detail 不负责评论");
+    }
+
+    #[test]
+    fn decode_entities_handles_named_and_numeric_references() {
+        assert_eq!(
+            decode_entities("A&amp;B&nbsp;&lt;x&gt;&quot;&#39;&#x4e2d;&#20320;"),
+            "A&B <x>\"'中你",
+            "具名实体、十进制与十六进制引用都应解码"
+        );
+    }
+
+    #[test]
+    fn find_date_takes_the_first_yyyy_mm_dd() {
+        assert_eq!(
+            find_date("觀看次數：105.9萬次  2026-10-16 18:20"),
+            Some("2026-10-16".to_owned())
+        );
+        assert_eq!(find_date("沒有日期"), None);
+    }
+
+    #[test]
+    fn parse_comments_skips_the_form_block_and_reads_two_comments() {
+        // 表单块在 comment-start 之前；第三条只有时间没有正文，必须被跳过
+        const COMMENTS_HTML: &str = r#"
+          <div class="comment-form"><a href="/login">登入以發表評論</a><textarea></textarea></div>
+          <div class="report-btn-wrapper" data-reportable-id="1001">
+            <div class="comment-index-text"><a href="/user/1">Alice&nbsp;&nbsp;<span style="color: darkgray;">2026-10-17 12:00</span></a></div>
+            <div class="comment-index-text">第一行&nbsp;內容 &lt;測試&gt;</div>
+          </div>
+          <div class="report-btn-wrapper" data-reportable-id="1002">
+            <div class="comment-index-text"><a href="/user/2">Bob&nbsp;&nbsp;<span style="color: darkgray;">2026-10-18 09:30</span></a></div>
+            <div class="comment-index-text">第二行<br>換行</div>
+          </div>
+          <div class="report-btn-wrapper" data-reportable-id="1003">
+            <div class="comment-index-text"><span style="color: darkgray;">2026-10-19 10:00</span></div>
+          </div>
+        "#;
+
+        let comments = parse_comments(COMMENTS_HTML);
+        assert_eq!(comments.len(), 2, "表单块与无正文块都不得计入评论");
+        assert_eq!(comments[0].author.as_deref(), Some("Alice"));
+        assert_eq!(comments[0].content, "第一行 內容 <測試>");
+        assert_eq!(comments[0].posted_at.as_deref(), Some("2026-10-17 12:00"));
+        assert_eq!(comments[0].likes, 0);
+        assert_eq!(comments[0].score, None);
+        assert_eq!(comments[1].author.as_deref(), Some("Bob"));
+        assert_eq!(comments[1].content, "第二行換行");
+        assert_eq!(comments[1].posted_at.as_deref(), Some("2026-10-18 09:30"));
+    }
+
+    #[test]
+    fn fetch_image_bytes_reads_a_jpeg_and_rejects_other_payloads() {
+        let covers = unique_dir("image-bytes");
+        let runner = Arc::new(FakeRunner::new(vec![
+            FakeOut::Image(JPEG_BYTES.to_vec()),
+            FakeOut::Image(b"<html>403</html>".to_vec()),
+        ]));
+        let provider = provider(runner, covers);
+
+        let bytes = provider
+            .fetch_image_bytes("https://cdn.test/image/thumbnail/1h.jpg")
+            .expect("落盘的 JPEG 应被接受");
+        assert_eq!(bytes, JPEG_BYTES.to_vec());
+
+        assert!(
+            provider
+                .fetch_image_bytes("https://cdn.test/image/thumbnail/2h.jpg")
+                .is_err(),
+            "非 JPEG 内容（如 403 错误页）必须返回错误"
         );
     }
 }

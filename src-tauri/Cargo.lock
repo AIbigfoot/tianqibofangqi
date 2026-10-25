@@ -368,6 +368,7 @@ dependencies = [
  "cinema-domain",
  "cinema-infra",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

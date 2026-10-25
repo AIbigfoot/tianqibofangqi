@@ -4,6 +4,7 @@
 //! 与**一个最小实现**（能走通契约测试的最小真实逻辑）。后续新增实现只需在本层
 //! 增加类型并注册，不必改动 L2。
 
+pub mod enrichment;
 pub mod javdb;
 pub mod llm;
 pub mod media_source;
@@ -14,5 +15,6 @@ pub mod player;
 pub mod subtitle;
 pub mod subtitle_proto;
 pub mod tag_dimension;
+pub mod thumbs;
 pub mod websearch;
 pub mod xunlei_subtitle;

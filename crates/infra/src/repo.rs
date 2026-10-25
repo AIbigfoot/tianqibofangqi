@@ -384,6 +384,35 @@ impl MediaItemRepo {
         Ok(out)
     }
 
+    /// 有年份信息、但指定维度还没有标签的条目：`(id, year, release_date)`。
+    /// 供启动时补齐年份标签使用。
+    pub fn items_missing_year_tag(
+        conn: &Connection,
+        dimension_id: &str,
+    ) -> Result<Vec<(ItemId, Option<i32>, Option<String>)>> {
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.year, m.release_date
+             FROM media_item m
+             WHERE (m.year IS NOT NULL OR m.release_date IS NOT NULL)
+               AND NOT EXISTS (
+                 SELECT 1 FROM item_tag it JOIN tag t ON t.id = it.tag_id
+                 WHERE it.item_id = m.id AND t.dimension_id = ?1
+               )",
+        )?;
+        let rows = stmt.query_map(params![dimension_id], |row| {
+            Ok((
+                ItemId(row.get(0)?),
+                row.get::<_, Option<i32>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// 探测得到的时长回填（`probe` 的结果，系统自动不可编辑）。
     pub fn set_duration(conn: &Connection, id: &ItemId, duration_ms: Option<i64>) -> Result<()> {
         conn.execute(
@@ -565,6 +594,44 @@ impl MediaItemRepo {
             None => {
                 "SELECT id FROM media_item
                  WHERE missing_at IS NULL AND scrape_state IN ('pending', 'failed', 'no_code')
+                 ORDER BY id"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let mut out: Vec<ItemId> = Vec::new();
+        if let Some(id) = source_id {
+            let rows = stmt.query_map(params![id.as_str()], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                out.push(ItemId(row?));
+            }
+        } else {
+            let rows = stmt.query_map(params![], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                out.push(ItemId(row?));
+            }
+        }
+        Ok(out)
+    }
+
+    /// 已刮削完成、但库里一条短评都没有的条目。
+    ///
+    /// 手动「补齐元数据」时用它在登录 Cookie 可用后重试短评：自动刮削仍只看
+    /// `pending / failed`，避免每次扫描都把全库重抓一遍。
+    pub fn ids_done_without_comments(
+        conn: &Connection,
+        source_id: Option<&SourceId>,
+    ) -> Result<Vec<ItemId>> {
+        let sql = match source_id {
+            Some(_) => {
+                "SELECT id FROM media_item
+                 WHERE source_id = ?1 AND missing_at IS NULL AND scrape_state = 'done'
+                   AND NOT EXISTS (SELECT 1 FROM item_comment c WHERE c.item_id = media_item.id)
+                 ORDER BY id"
+            }
+            None => {
+                "SELECT id FROM media_item
+                 WHERE missing_at IS NULL AND scrape_state = 'done'
+                   AND NOT EXISTS (SELECT 1 FROM item_comment c WHERE c.item_id = media_item.id)
                  ORDER BY id"
             }
         };

@@ -159,6 +159,24 @@ pub fn watch_state(watched: bool, has_progress: bool) -> &'static str {
     }
 }
 
+/// 年份维度的取值标签，如 `2015年`。
+///
+/// 只接受 1900–2100 的四位年份：超出范围的值视为脏数据，宁可不给取值也不猜。
+pub fn year_label(year: i32) -> Option<String> {
+    (1900..=2100).contains(&year).then(|| format!("{year}年"))
+}
+
+/// 从发行日期（`YYYY-MM-DD`）或年份数字取年份标签；日期优先。
+///
+/// 日期只取前四位，不解析月日——年份维度只关心年份本身。
+pub fn year_label_from(release_date: Option<&str>, year: Option<i32>) -> Option<String> {
+    let parsed = release_date
+        .map(str::trim)
+        .and_then(|date| date.get(0..4))
+        .and_then(|prefix| prefix.parse::<i32>().ok());
+    year_label(parsed.or(year)?)
+}
+
 // ---------------------------------------------------------------------------
 // 标签清单（供检索区渲染）
 // ---------------------------------------------------------------------------
@@ -455,5 +473,22 @@ mod tests {
         assert_eq!(watch_state(true, true), WATCH_WATCHED);
         assert_eq!(watch_state(false, true), WATCH_WATCHING);
         assert_eq!(watch_state(false, false), WATCH_UNSEEN);
+    }
+
+    #[test]
+    fn year_label_reads_release_date_or_year() {
+        assert_eq!(year_label(2015).as_deref(), Some("2015年"));
+        assert_eq!(year_label(1800), None, "超出范围的年份不给取值");
+        assert_eq!(
+            year_label_from(Some("2016-04-01"), Some(2015)).as_deref(),
+            Some("2016年"),
+            "日期优先于年份数字"
+        );
+        assert_eq!(
+            year_label_from(None, Some(2015)).as_deref(),
+            Some("2015年")
+        );
+        assert_eq!(year_label_from(None, None), None);
+        assert_eq!(year_label_from(Some("不详"), Some(2015)).as_deref(), Some("2015年"));
     }
 }

@@ -26,17 +26,27 @@ const els = {};
   'add-btn', 'data-btn', 'online-btn', 'manage-btn', 'meta-btn', 'preview-toggle', 'stats',
   'manage-modal', 'manage-list', 'manage-close', 'manage-close-2',
   'manage-summary', 'manage-source-count', 'manage-detail',
+  'manage-progress', 'manage-progress-text', 'manage-progress-pct', 'manage-progress-fill',
+  'manage-progress-current',
+  'storage-btn', 'storage-modal', 'storage-current', 'storage-pending', 'storage-pending-path',
+  'storage-env', 'storage-config-path', 'storage-pick', 'storage-reset', 'storage-cancel', 'storage-save',
+  'storage-download', 'storage-download-pending', 'storage-download-pending-path',
+  'storage-download-env', 'storage-pick-download', 'storage-reset-download',
   'meta-modal', 'meta-base', 'meta-cookie', 'meta-status', 'meta-save', 'meta-scrape-all', 'meta-close',
   'llm-base', 'llm-key', 'llm-model', 'llm-status',
   'llm-provider', 'llm-provider-model', 'llm-custom', 'llm-model-preset',
   'meta-progress', 'meta-progress-text', 'meta-progress-pct', 'meta-progress-fill', 'meta-progress-current',
   'detail-modal', 'detail-poster', 'detail-title', 'detail-meta', 'detail-tags',
-  'detail-play', 'detail-trailer', 'detail-refresh', 'detail-x', 'detail-state',
+  'detail-play', 'detail-trailer', 'detail-refresh', 'detail-enrich', 'detail-x', 'detail-state',
+  'detail-download', 'detail-download-status', 'detail-download-fill', 'detail-download-text',
+  'download-panel', 'dlp-list', 'dlp-close', 'dlp-min', 'dlp-title',
   'detail-shots', 'detail-comments', 'trailer-stage', 'trailer-frame', 'lightbox', 'lightbox-img',
+  'lightbox-prev', 'lightbox-next', 'lightbox-count',
   'trailer-controls', 'trailer-seek', 'trailer-time', 'trailer-close', 'player-backdrop',
   'data-modal', 'data-path', 'data-export', 'data-import', 'data-cancel',
   'scan-overlay', 'scan-title', 'scan-bar-fill', 'scan-detail', 'scan-current', 'scan-cancel',
   'online-modal', 'online-url', 'online-import', 'online-cancel', 'online-result',
+  'online-start-page', 'online-end-page',
   'searchbar', 'search-input', 'filter-toggle', 'tag-back', 'multi-toggle', 'sort-select', 'size-group', 'filter-bar', 'dims',
   'wall', 'empty', 'grid', 'sources',
   'select-bar', 'select-count', 'select-all', 'select-enter', 'select-remove', 'select-cancel',
@@ -513,10 +523,46 @@ const coverCache = new Map();
  * 列表页卡片逐张下载），所以每张卡片可以各自独立重试、不必串行排队：请求本身很廉价，
  * 第一次没命中会顺手挂起一次「按源抓封面」，之后各卡片陆续能拿到。
  */
-/** 封面加载后保持卡片横版铺满，不再按图片比例改写卡片尺寸。 */
+/**
+ * 按封面真实比例塑造卡片外形。
+ *
+ * javdb 的封面是横版（800×538），hanime1 的是竖版（约 3:4 ~ 9:16）。
+ * 统一按 3:2 裁切会把竖版封面的主体裁掉一大半，所以这里读一次图片的
+ * 实际宽高，把比例写进卡片自己的 `--cover-ratio`：
+ *   - 竖版：原样呈现（最多压到 1:2，避免出现细长条）
+ *   - 横版：原样呈现（最多放宽到 2.4:1）
+ * 只作用于这张卡，不影响宽幅推荐位（那一类由更具体的选择器固定 16:9）。
+ */
 function fitCardToPoster(img) {
-  // 横版卡固定 16:9，由 CSS 决定；这里保留空实现只用于兼容旧调用点。
-  void img;
+  const apply = () => {
+    const width = img.naturalWidth;
+    const height = img.naturalHeight;
+    if (!width || !height) {
+      return;
+    }
+    const card = img.closest('.card');
+    if (!card) {
+      return;
+    }
+    let ratio = width / height;
+    if (ratio < 1) {
+      ratio = Math.max(0.5, ratio);
+      card.classList.add('portrait');
+    } else {
+      ratio = Math.min(2.4, ratio);
+      card.classList.remove('portrait');
+    }
+    card.style.setProperty('--cover-ratio', ratio.toFixed(4));
+    // 卡片面积对齐：竖版保持原宽会明显比横版大，按 sqrt(比例 / 1.5) 缩窄，
+    // 使「宽 × 高」与 3:2 横版卡接近（横版更宽时缩到 1，不溢出列宽）
+    const scale = Math.min(1, Math.sqrt(ratio / 1.5));
+    card.style.setProperty('--card-scale', scale.toFixed(4));
+  };
+  if (img.complete && img.naturalWidth) {
+    apply();
+  } else {
+    img.addEventListener('load', apply, { once: true });
+  }
 }
 
 function loadCover(itemId, img) {
@@ -1055,6 +1101,8 @@ async function play(itemId, startMs, item) {
   playerSentReserve = 0;
   applyView();
   startTick();
+  // 播放器实例可能被复用：每次打开都把本机记忆的音量下发一次
+  invoke('set_volume', { volume: volumeLevel }).catch(() => {});
   // 画面比例决定字幕应贴在画面内底部还是窗口底部，首帧后读取
   watchVideoAspect();
   // 打开成功后取入口可见性 + 已存轨道：有外挂/生成轨道时按其句时间轴复用渲染
@@ -1233,15 +1281,16 @@ function schedulePlayerBarHide() {
   }, PLAYER_BAR_IDLE_MS);
 }
 
-async function forwardBy(seconds) {
+/** 以当前位置为基准跳转（负值为快退）；贴近片尾时停在片尾前，避免直接触发结束。 */
+async function seekBy(deltaMs) {
   if (!playingId || inMulti) return;
-  const delta = Math.round(Number(seconds) * 1000);
+  const delta = Math.round(Number(deltaMs) || 0);
   if (!delta) return;
   const base = Math.max(0, lastPositionMs || 0);
-  let target = base + delta;
+  let target = Math.max(0, base + delta);
   if (currentDurationMs > 0) {
-    // 贴近片尾时停在片尾前，避免 seek 到总时长直接触发结束
-    target = Math.min(target, Math.max(base, currentDurationMs - 500));
+    // 快进/快退都只受片尾约束，允许退回到片头
+    target = Math.min(target, Math.max(0, currentDurationMs - 500));
   }
   try {
     await invoke('seek', { positionMs: target });
@@ -1257,6 +1306,76 @@ async function forwardBy(seconds) {
   // seek 丢弃旧句：清空本地累积的句子与复用轨道当前句（与拖动进度条一致）
   resetSubtitleText(null);
   renderSubtitleLines(null);
+}
+
+// ---- 音量：本机记忆，播放器打开时下发（↑↓ 每次 5%） ----
+
+const VOLUME_KEY = 'cinema.volume';
+
+function readVolumePref() {
+  try {
+    const raw = Number(localStorage.getItem(VOLUME_KEY));
+    if (Number.isFinite(raw) && raw >= 0 && raw <= 100) return Math.round(raw);
+  } catch (err) {
+    /* 存储不可用时用默认值 */
+  }
+  return 100;
+}
+
+let volumeLevel = readVolumePref();
+
+/** 调音量（↑↓ 每次 5%）。提示由后端用 mpv OSD 画在画面上 —— 页面层会被
+ *  原生画面窗口盖住，所以这里不再自己画进度条。 */
+async function changeVolume(delta) {
+  if (!playingId) return;
+  const next = Math.max(0, Math.min(100, volumeLevel + Math.round(delta)));
+  volumeLevel = next;
+  try {
+    localStorage.setItem(VOLUME_KEY, String(volumeLevel));
+  } catch (err) {
+    /* 存储不可用时仅本次生效 */
+  }
+  try {
+    const applied = await invoke('set_volume', { volume: volumeLevel });
+    if (typeof applied === 'number' && Number.isFinite(applied)) {
+      volumeLevel = Math.round(applied);
+      try {
+        localStorage.setItem(VOLUME_KEY, String(volumeLevel));
+      } catch (err) {
+        /* 存储不可用时仅本次生效 */
+      }
+    }
+  } catch (err) {
+    showToast(String(err));
+  }
+}
+
+/** 播放页方向键的统一处理：← / → 快退快进，↑ / ↓ 调音量。
+ *  页面与原生画面窗口（后端 `player-key` 转发）共用同一套逻辑，避免两处映射不一致。 */
+function handlePlayerKey(key, target) {
+  if (!playingId || inMulti) return false;
+  if (isTypingTarget(target) || modalOpen()) return false;
+  const stepMs = Math.round(forwardSeconds * 1000);
+  switch (key) {
+    case 'ArrowRight':
+      revealPlayerBar();
+      seekBy(stepMs);
+      return true;
+    case 'ArrowLeft':
+      revealPlayerBar();
+      seekBy(-stepMs);
+      return true;
+    case 'ArrowUp':
+      revealPlayerBar();
+      changeVolume(5);
+      return true;
+    case 'ArrowDown':
+      revealPlayerBar();
+      changeVolume(-5);
+      return true;
+    default:
+      return false;
+  }
 }
 
 const ICON_PAUSE =
@@ -1506,11 +1625,37 @@ async function scanSource(source) {
 let detailItem = null;
 /** 详情请求序号：重开或重抓时丢弃过期响应，避免旧数据覆盖新画面。 */
 let detailSeq = 0;
+/** 已经触发过「从视频补足截图」的条目：同一会话不重复抽帧。 */
+const shotsFillTried = new Set();
+/** 详情页截图目标张数（与后端 DETAIL_SHOTS_TARGET 一致）。 */
+const DETAIL_SHOTS_TARGET = 10;
 
 /** 用户点「补齐全库」触发的批处理：用于把 scrape-progress 事件只落到这条进度条上。 */
 let scrapeBatchActive = false;
 let scrapeBatchDone = 0;
 let scrapeBatchTotal = 0;
+
+/** 批量补齐的如实回执：处理数量、补截图数量、仍缺短评及原因。 */
+function scrapeSummaryText(view, withProgress) {
+  const parts = [];
+  if (view.processed) {
+    parts.push(withProgress ? `处理 ${view.processed} / ${view.total} 条` : `已处理 ${view.processed} 条`);
+  }
+  if (view.shotsFilled) {
+    parts.push(`为 ${view.shotsFilled} 部补足截图`);
+  }
+  if (view.commentsMissing) {
+    parts.push(
+      view.loggedIn
+        ? `${view.commentsMissing} 条仍无短评（数据源未提供）`
+        : `${view.commentsMissing} 条仍无短评，需在「元数据」登录后重试`,
+    );
+  }
+  if (!parts.length) {
+    parts.push('没有待补齐的条目');
+  }
+  return parts.join('；');
+}
 
 async function openMetaModal() {
   els['meta-modal'].classList.remove('hidden');
@@ -1646,7 +1791,31 @@ async function saveMetaSettings() {
   }
 }
 
-/** 进度事件 → 进度条：总数、已处理、百分比与当前条目标题。 */
+/** 批量补齐进度：元数据弹层与库管理页两处同步（哪处打开就看哪处）。 */
+function setScrapeProgress(done, total, current) {
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const text = total > 0 ? `正在补齐元数据：${done} / ${total}` : '正在读取待补齐条目…';
+  for (const prefix of ['meta', 'manage']) {
+    els[`${prefix}-progress`].classList.remove('hidden');
+    els[`${prefix}-progress-fill`].style.width = `${pct}%`;
+    els[`${prefix}-progress-pct`].textContent = `${pct}%`;
+    els[`${prefix}-progress-text`].textContent = text;
+    els[`${prefix}-progress-current`].textContent = current;
+  }
+}
+
+/** 补齐结束后两处进度块都停在结果上（成功推进到 100%，失败保留已跑位置）。 */
+function finishScrapeProgress(text, finished) {
+  for (const prefix of ['meta', 'manage']) {
+    if (finished) {
+      els[`${prefix}-progress-fill`].style.width = '100%';
+      els[`${prefix}-progress-pct`].textContent = '100%';
+    }
+    els[`${prefix}-progress-text`].textContent = text;
+    els[`${prefix}-progress-current`].textContent = '';
+  }
+}
+
 function updateScrapeProgress(payload) {
   if (!scrapeBatchActive) {
     return;
@@ -1655,15 +1824,8 @@ function updateScrapeProgress(payload) {
   const done = Number(payload.done) || 0;
   scrapeBatchDone = done;
   scrapeBatchTotal = total;
-  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
-  els['meta-progress'].classList.remove('hidden');
-  els['meta-progress-fill'].style.width = `${pct}%`;
-  els['meta-progress-pct'].textContent = `${pct}%`;
-  els['meta-progress-text'].textContent = total
-    ? `正在补齐元数据：${done} / ${total}`
-    : '正在读取待补齐条目…';
   const item = consoleItemById(payload.itemId) || items.find((i) => i.id === payload.itemId);
-  els['meta-progress-current'].textContent = item ? item.title : payload.itemId || '';
+  setScrapeProgress(done, total, item ? item.title : payload.itemId || '');
 }
 
 /** 批量补齐：不指定源则补齐全库中待刮削 / 上次失败的条目；批处理期间显示进度条。 */
@@ -1674,37 +1836,198 @@ async function scrapeMissing(sourceId) {
   scrapeBatchActive = true;
   scrapeBatchDone = 0;
   scrapeBatchTotal = 0;
-  els['meta-progress'].classList.remove('hidden');
-  els['meta-progress-fill'].style.width = '0%';
-  els['meta-progress-pct'].textContent = '0%';
-  els['meta-progress-text'].textContent = '正在读取待补齐条目…';
-  els['meta-progress-current'].textContent = '';
+  setScrapeProgress(0, 0, '');
   els['meta-scrape-all'].disabled = true;
   els['meta-scrape-all'].textContent = '补齐中…';
   let aborted = false;
+  let summary = null;
   try {
-    const count = await invoke('scrape_missing', sourceId ? { sourceId } : {});
+    summary = await invoke('scrape_missing', sourceId ? { sourceId } : {});
     coverCache.clear();
-    showToast(count ? `已刮削 ${count} 条元数据` : '没有待刮削的条目');
+    showToast(scrapeSummaryText(summary, false), 6500);
     await refresh();
     await reloadFilters();
   } catch (err) {
     aborted = true;
     showToast(String(err));
-    els['meta-progress-text'].textContent = '补齐中止';
+    finishScrapeProgress('补齐中止', false);
   } finally {
     scrapeBatchActive = false;
     els['meta-scrape-all'].disabled = false;
     els['meta-scrape-all'].textContent = '补齐全库';
     // 收尾：成功时把条推到 100%，失败则保留已跑到位置供排查
     if (!aborted) {
-      els['meta-progress-fill'].style.width = '100%';
-      els['meta-progress-pct'].textContent = '100%';
-      els['meta-progress-text'].textContent = scrapeBatchTotal
-        ? `补齐完成 · 已处理 ${scrapeBatchDone} / ${scrapeBatchTotal}`
-        : '没有待补齐的条目';
-      els['meta-progress-current'].textContent = '';
+      finishScrapeProgress(
+        summary ? `补齐完成 · ${scrapeSummaryText(summary, true)}` : '没有待补齐的条目',
+        true,
+      );
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 联网源视频下载：右下角任务面板 + 详情页下载按钮与行内进度
+// ---------------------------------------------------------------------------
+
+/** 下载任务快照：itemId -> { itemId, title, state, percent, dest, error }。 */
+const downloads = new Map();
+/** 当前详情条目是否来自联网源（决定是否显示下载按钮）。 */
+let detailOnline = false;
+/** 当前详情条目的视频是否已经下载完成（完成后不再显示下载入口）。 */
+let detailDownloaded = false;
+
+function downloadStateText(view) {
+  switch (view.state) {
+    case 'running':
+      return `${Math.max(0, Math.min(100, Math.round(view.percent || 0)))}%`;
+    case 'done':
+      return '已完成';
+    case 'failed':
+      return '失败';
+    case 'skipped':
+      return '已存在';
+    default:
+      return '';
+  }
+}
+
+/** 下载面板是否被用户手动关掉：关掉后进度回执不再把它弹回来。 */
+let downloadPanelClosed = false;
+
+/** 收一条进度回执：更新任务表、右下角面板与（若正开着）详情页行内进度。 */
+function applyDownloadView(view) {
+  if (!view || !view.itemId) {
+    return;
+  }
+  downloads.set(view.itemId, view);
+  if (view.state === 'done' && detailItem && view.itemId === detailItem.id) {
+    detailDownloaded = true;
+  }
+  if (!downloadPanelClosed) {
+    els['download-panel'].classList.remove('hidden');
+  }
+  renderDownloadPanel();
+  syncDetailDownload();
+}
+
+function renderDownloadPanel() {
+  const list = els['dlp-list'];
+  if (!list) {
+    return;
+  }
+  const views = [...downloads.values()];
+  const running = views.filter((v) => v.state === 'running');
+  // 标题栏常驻汇总：最小化后也能看到还剩几条
+  els['dlp-title'].textContent = running.length
+    ? `下载任务 ${running.length} 进行中`
+    : '下载任务';
+  list.replaceChildren();
+  if (!downloads.size) {
+    list.appendChild(el('div', 'dlp-empty', '暂无下载任务'));
+    return;
+  }
+  const rank = (v) => (v.state === 'running' ? 0 : v.state === 'failed' ? 1 : 2);
+  const rows = [...downloads.values()].sort((a, b) => rank(a) - rank(b));
+  for (const view of rows) {
+    const row = el('div', `dlp-row ${view.state}`);
+    const head = el('div', 'dlp-row-head');
+    head.appendChild(el('span', 'dlp-name', view.title || view.itemId));
+    head.appendChild(el('span', `dlp-state ${view.state}`, downloadStateText(view)));
+    row.appendChild(head);
+    const bar = el('div', 'dlp-bar');
+    const fill = el('i', 'dlp-fill');
+    fill.style.width = `${Math.max(0, Math.min(100, Math.round(view.percent || 0)))}%`;
+    bar.appendChild(fill);
+    row.appendChild(bar);
+    if (view.state === 'failed' && view.error) {
+      row.appendChild(el('div', 'dlp-err', view.error));
+    }
+    list.appendChild(row);
+  }
+}
+
+/** 详情页：联网条目显示「下载视频」，并按任务状态渲染按钮文案与行内进度。 */
+function syncDetailDownload() {
+  const btn = els['detail-download'];
+  const status = els['detail-download-status'];
+  if (!btn || !status) {
+    return;
+  }
+  if (!detailOnline || !detailItem || detailDownloaded) {
+    btn.classList.add('hidden');
+    status.classList.add('hidden');
+    return;
+  }
+  btn.classList.remove('hidden');
+  const view = downloads.get(detailItem.id);
+  if (!view) {
+    btn.disabled = false;
+    btn.textContent = '下载视频';
+    status.classList.add('hidden');
+    return;
+  }
+  const running = view.state === 'running';
+  btn.disabled = running || view.state === 'done';
+  btn.textContent = running
+    ? '下载中…'
+    : view.state === 'done'
+      ? '已下载'
+      : view.state === 'failed'
+        ? '重试下载'
+        : '下载视频';
+  if (view.state === 'done') {
+    status.classList.add('hidden');
+    return;
+  }
+  const pct = Math.max(0, Math.min(100, Math.round(view.percent || 0)));
+  status.classList.remove('hidden');
+  els['detail-download-fill'].style.width = `${pct}%`;
+  els['detail-download-text'].textContent = view.state === 'failed' ? '失败' : `${pct}%`;
+}
+
+async function downloadCurrentItem() {
+  if (!detailItem || !detailOnline) {
+    return;
+  }
+  const itemId = detailItem.id;
+  const known = downloads.get(itemId);
+  if (known && known.state === 'done') {
+    showToast('该视频已下载，无需重复下载');
+    return;
+  }
+  if (known && known.state === 'running') {
+    showToast('该视频正在下载中');
+    return;
+  }
+  downloadPanelClosed = false;
+  els['download-panel'].classList.remove('hidden');
+  els['detail-download'].disabled = true;
+  els['detail-download'].textContent = '下载中…';
+  try {
+    const view = await invoke('start_online_download', { itemId });
+    applyDownloadView(view);
+    if (view && view.state === 'done') {
+      showToast('该视频已下载，无需重复下载');
+    }
+  } catch (err) {
+    els['detail-download'].disabled = false;
+    els['detail-download'].textContent = '下载视频';
+    showToast(String(err));
+  }
+}
+
+/** 下载某个在线源的全部视频（已在下载目录里的会直接标记完成）。 */
+async function downloadWholeSource(source) {
+  if (!source || source.kind !== 'online_site') {
+    return;
+  }
+  downloadPanelClosed = false;
+  els['download-panel'].classList.remove('hidden');
+  try {
+    const count = await invoke('download_online_source', { sourceId: source.id });
+    showToast(count ? `已加入下载队列：${count} 条` : '没有待下载的条目（都已下载过）');
+  } catch (err) {
+    showToast(String(err));
   }
 }
 
@@ -1732,6 +2055,12 @@ async function openDetail(item) {
   els['detail-meta'].textContent = '正在读取元数据…';
   els['detail-state'].textContent = '';
   els['detail-trailer'].disabled = true;
+  detailOnline = false;
+  detailDownloaded = false;
+  els['detail-download'].classList.add('hidden');
+  els['detail-download-status'].classList.add('hidden');
+  els['detail-poster'].classList.remove('portrait');
+  els['detail-poster'].style.removeProperty('--detail-cover-ratio');
   els['detail-poster'].replaceChildren();
   els['detail-tags'].replaceChildren();
   els['detail-shots'].replaceChildren();
@@ -1821,6 +2150,56 @@ async function backFromTagBrowse() {
   }
 }
 
+/** 渲染详情页截图条：文件名顺序即展示顺序（补帧已按时间升序追加）。 */
+function renderDetailShots(itemId, names, seq) {
+  const list = Array.isArray(names) ? names.slice() : [];
+  /** 与截图条同序的已加载图片：放大层直接复用，避免重复请求。 */
+  const srcs = [];
+  els['detail-shots'].replaceChildren();
+  if (!list.length) {
+    els['detail-shots'].appendChild(el('div', 'detail-meta', '暂无截图'));
+    return;
+  }
+  list.forEach((name, index) => {
+    const img = document.createElement('img');
+    img.alt = '截图';
+    img.addEventListener('click', () =>
+      openLightbox(img.src, { itemId, names: list, srcs, index }),
+    );
+    els['detail-shots'].appendChild(img);
+    invoke('item_screenshot', { itemId, fileName: name })
+      .then((src) => {
+        if (src && seq === detailSeq) {
+          img.src = src;
+          srcs[index] = src;
+        } else {
+          img.remove();
+        }
+      })
+      .catch(() => img.remove());
+  });
+}
+
+/** 截图不足 10 张时从视频文件按随机时间抽帧补满；拿不到视频（在线未下载）就静默跳过。 */
+async function fillDetailShots(itemId, seq) {
+  shotsFillTried.add(itemId);
+  const tip = el('div', 'detail-meta', '正在从视频补足截图…');
+  if (seq === detailSeq && !els['detail-shots'].childElementCount) {
+    els['detail-shots'].appendChild(tip);
+  }
+  try {
+    const names = await invoke('fill_screenshots', { itemId });
+    if (seq !== detailSeq || !Array.isArray(names)) {
+      return;
+    }
+    renderDetailShots(itemId, names, seq);
+  } catch (err) {
+    if (seq === detailSeq) {
+      tip.remove();
+    }
+  }
+}
+
 async function loadDetail(itemId, seq) {
   let data;
   try {
@@ -1835,6 +2214,10 @@ async function loadDetail(itemId, seq) {
     return;
   }
 
+  // 联网源条目：详情里额外提供「下载视频」入口与进度；已下载完成的不再显示
+  detailOnline = !!data.online;
+  detailDownloaded = !!data.downloaded;
+
   els['detail-title'].textContent = data.title || '—';
   const meta = [];
   if (data.code) meta.push(`番号 ${data.code}`);
@@ -1847,6 +2230,20 @@ async function loadDetail(itemId, seq) {
     const img = document.createElement('img');
     img.alt = data.title || '封面';
     img.addEventListener('click', () => openLightbox(img.src));
+    // 封面加载后按真实比例调整海报框：竖版封面不再被横框压缩
+    img.addEventListener('load', () => {
+      if (seq !== detailSeq) {
+        return;
+      }
+      const width = img.naturalWidth;
+      const height = img.naturalHeight;
+      if (!width || !height) {
+        return;
+      }
+      const ratio = width / height;
+      els['detail-poster'].style.setProperty('--detail-cover-ratio', ratio.toFixed(4));
+      els['detail-poster'].classList.toggle('portrait', ratio < 1);
+    });
     els['detail-poster'].appendChild(img);
     const cached = coverCache.get(itemId);
     if (cached) {
@@ -1888,24 +2285,14 @@ async function loadDetail(itemId, seq) {
     els['detail-tags'].appendChild(el('div', 'detail-meta', '暂无标签：点「从数据源更新」抓取'));
   }
 
-  if (Array.isArray(data.screenshots) && data.screenshots.length) {
-    for (const name of data.screenshots) {
-      const img = document.createElement('img');
-      img.alt = '截图';
-      img.addEventListener('click', () => openLightbox(img.src));
-      els['detail-shots'].appendChild(img);
-      invoke('item_screenshot', { itemId, fileName: name })
-        .then((src) => {
-          if (src && seq === detailSeq) {
-            img.src = src;
-          } else {
-            img.remove();
-          }
-        })
-        .catch(() => img.remove());
-    }
-  } else {
-    els['detail-shots'].appendChild(el('div', 'detail-meta', '暂无截图'));
+  renderDetailShots(itemId, data.screenshots, seq);
+  // 截图不足时后台从视频按随机时间补满（同一会话每条只尝试一次）
+  if (
+    Array.isArray(data.screenshots) &&
+    data.screenshots.length < DETAIL_SHOTS_TARGET &&
+    !shotsFillTried.has(itemId)
+  ) {
+    fillDetailShots(itemId, seq);
   }
 
   if (Array.isArray(data.comments) && data.comments.length) {
@@ -1933,6 +2320,7 @@ async function loadDetail(itemId, seq) {
   els['detail-state'].textContent = scrapeStateText(data);
   els['detail-trailer'].disabled = !data.hasTrailer;
   els['detail-trailer'].title = data.hasTrailer ? '' : '还没有预告片，点「从数据源更新」抓取';
+  syncDetailDownload();
 }
 
 /** 当前详情条目重新从数据源抓取（手动触发，force = true）。 */
@@ -1963,6 +2351,40 @@ async function scrapeCurrentItem() {
     showToast(String(err));
   } finally {
     els['detail-refresh'].disabled = false;
+  }
+}
+
+/** 用 JavLibrary / hanime.tv 补全当前条目资料：后端只填空白字段，已有值不覆盖。 */
+async function enrichCurrentItem() {
+  if (!detailItem) {
+    return;
+  }
+  const item = detailItem;
+  const btn = els['detail-enrich'];
+  btn.disabled = true;
+  btn.textContent = '补全中…';
+  els['detail-state'].textContent = '正在查询 JavLibrary / hanime.tv…';
+  try {
+    const result = await invoke('enrich_item', { itemId: item.id, source: 'auto' });
+    if (!result.applied || !result.applied.length) {
+      const reason = result.message || '没有可补充的新字段';
+      els['detail-state'].textContent = `补全失败：${reason}`;
+      showToast(`补全失败：${reason}`, 3800);
+      return;
+    }
+    const label = result.source === 'javlibrary' ? 'JavLibrary' : result.source === 'hanime' ? 'hanime.tv' : result.source;
+    els['detail-state'].textContent = `已从 ${label} 补全：${result.applied.join('、')}`;
+    showToast(`已从 ${label} 补全：${result.applied.join('、')}`, 3800);
+    coverCache.delete(item.id);
+    await loadDetail(item.id, (detailSeq += 1));
+    await refresh();
+    await reloadFilters();
+  } catch (err) {
+    els['detail-state'].textContent = String(err);
+    showToast(String(err));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '补全资料';
   }
 }
 
@@ -1999,18 +2421,115 @@ async function playDetailTrailer() {
   }
 }
 
-/** 放大查看封面 / 截图：全屏遮罩层，点击任意处关闭。 */
-function openLightbox(src) {
-  if (!src) {
+/**
+ * 图片放大层。
+ *
+ * 单张（封面）只做放大；从截图条打开时带 `gallery`，可用左右箭头 / ← → 键切换。
+ */
+let lightboxState = null;
+
+function openLightbox(src, gallery) {
+  if (gallery && Array.isArray(gallery.names) && gallery.names.length) {
+    lightboxState = {
+      itemId: gallery.itemId,
+      names: gallery.names,
+      srcs: gallery.srcs || [],
+      index: Math.max(0, Math.min(gallery.index || 0, gallery.names.length - 1)),
+    };
+    if (src) {
+      lightboxState.srcs[lightboxState.index] = src;
+    }
+    showLightboxCurrent();
+  } else if (src) {
+    lightboxState = null;
+    els['lightbox-img'].src = src;
+  } else {
     return;
   }
-  els['lightbox-img'].src = src;
+  syncLightboxChrome();
   els['lightbox'].classList.remove('hidden');
+}
+
+/** 渲染当前这一张（缓存里有就直接用，没有就向后端取）。 */
+function showLightboxCurrent() {
+  if (!lightboxState) {
+    return;
+  }
+  const state = lightboxState;
+  const index = state.index;
+  const cached = state.srcs[index];
+  if (cached) {
+    els['lightbox-img'].src = cached;
+  } else {
+    invoke('item_screenshot', { itemId: state.itemId, fileName: state.names[index] })
+      .then((src) => {
+        if (lightboxState !== state) {
+          return;
+        }
+        if (!src) {
+          els['lightbox-img'].removeAttribute('src');
+          return;
+        }
+        state.srcs[index] = src;
+        if (state.index === index) {
+          els['lightbox-img'].src = src;
+        }
+      })
+      .catch(() => {});
+  }
+  // 邻近两张顺手预取：切换时少一次等待
+  prefetchLightboxShot(index + 1);
+  prefetchLightboxShot(index - 1);
+  syncLightboxChrome();
+}
+
+function prefetchLightboxShot(index) {
+  if (!lightboxState) {
+    return;
+  }
+  const state = lightboxState;
+  const count = state.names.length;
+  if (count < 2) {
+    return;
+  }
+  const at = ((index % count) + count) % count;
+  if (state.srcs[at]) {
+    return;
+  }
+  invoke('item_screenshot', { itemId: state.itemId, fileName: state.names[at] })
+    .then((src) => {
+      if (src && lightboxState === state) {
+        state.srcs[at] = src;
+      }
+    })
+    .catch(() => {});
+}
+
+/** 左右切换：单张（封面）或未在画廊状态时什么都不做。 */
+function stepLightbox(delta) {
+  if (!lightboxState || lightboxState.names.length < 2) {
+    return;
+  }
+  const count = lightboxState.names.length;
+  lightboxState.index = ((lightboxState.index + delta) % count + count) % count;
+  showLightboxCurrent();
+}
+
+/** 箭头与页码只在多张截图时出现。 */
+function syncLightboxChrome() {
+  const multi = !!lightboxState && lightboxState.names.length > 1;
+  els['lightbox-prev'].classList.toggle('hidden', !multi);
+  els['lightbox-next'].classList.toggle('hidden', !multi);
+  els['lightbox-count'].classList.toggle('hidden', !multi);
+  els['lightbox-count'].textContent = multi
+    ? `${lightboxState.index + 1} / ${lightboxState.names.length}`
+    : '';
 }
 
 function closeLightbox() {
   els['lightbox'].classList.add('hidden');
   els['lightbox-img'].removeAttribute('src');
+  lightboxState = null;
 }
 
 /** 从详情进入正式播放：先收起详情，避免与续播弹层叠在一起。 */
@@ -2045,6 +2564,13 @@ async function openManageModal() {
   els['manage-list'].replaceChildren();
   els['manage-detail'].replaceChildren();
   els['manage-modal'].classList.remove('hidden');
+  // 上次补齐结果不跨次保留：非补齐中时清空进度块
+  if (!scrapeBatchActive) {
+    els['manage-progress'].classList.add('hidden');
+    els['manage-progress-fill'].style.width = '0%';
+    els['manage-progress-pct'].textContent = '0%';
+    els['manage-progress-current'].textContent = '';
+  }
   await renderManageList();
 }
 
@@ -2239,15 +2765,26 @@ function renderManageDetail() {
   const maintainHead = el('div', 'md-section-head');
   maintainHead.append(
     el('span', 'md-section-title', '维护'),
-    el('span', 'md-section-note', '按番号抓取标题 / 封面 / 标签 / 短评'),
+    el('span', 'md-section-note', '按番号抓取字段与短评；截图不足 10 张会从视频抽帧补足'),
   );
   const maintain = el('div', 'md-actions');
   const fill = el('button', 'btn', '补齐元数据');
   fill.type = 'button';
   fill.disabled = !source.itemCount;
-  fill.title = '按番号从数据源抓取标题 / 封面 / 截图 / 标签 / 日期 / 演员 / 短评 / 预告片';
+  fill.title =
+    '按番号从数据源抓取标题 / 封面 / 标签 / 日期 / 演员 / 短评 / 预告片；截图不足 10 张时从本地视频随机时间抽帧补满';
   fill.addEventListener('click', () => scrapeMissing(source.id));
   maintain.appendChild(fill);
+
+  // 联网导入的源：额外提供整源下载（已在下载目录里的条目会直接标记完成）
+  if (source.kind === 'online_site') {
+    const download = el('button', 'btn', '下载全部视频');
+    download.type = 'button';
+    download.disabled = !source.itemCount;
+    download.title = '把该源的全部视频下载到「视频下载目录」，已存在的跳过';
+    download.addEventListener('click', () => downloadWholeSource(source));
+    maintain.appendChild(download);
+  }
   maintainSec.append(maintainHead, maintain);
   box.appendChild(maintainSec);
 
@@ -2265,6 +2802,169 @@ function renderManageDetail() {
   clear.addEventListener('click', () => clearSource(source));
   danger.append(dangerText, clear);
   box.appendChild(danger);
+}
+
+// ---------------------------------------------------------------------------
+// 存储位置：库信息（元数据）与视频文件分开存放
+// ---------------------------------------------------------------------------
+
+/** 最近一次 `storage_settings` 回执。 */
+let storageInfo = null;
+/** 元数据目录：用户新选的目录；`null` 表示本次没改。 */
+let storagePicked = null;
+/** 元数据目录：用户点了「恢复默认」。 */
+let storageRestore = false;
+/** 视频下载目录：用户新选的目录。 */
+let storageDownloadPicked = null;
+/** 视频下载目录：用户点了「恢复默认」。 */
+let storageDownloadRestore = false;
+
+async function openStorageModal() {
+  storagePicked = null;
+  storageRestore = false;
+  storageDownloadPicked = null;
+  storageDownloadRestore = false;
+  els['storage-modal'].classList.remove('hidden');
+  await loadStorageSettings();
+}
+
+function hideStorageModal() {
+  els['storage-modal'].classList.add('hidden');
+}
+
+async function loadStorageSettings() {
+  els['storage-current'].textContent = '正在读取…';
+  els['storage-download'].textContent = '正在读取…';
+  try {
+    storageInfo = await invoke('storage_settings');
+    renderStorageSettings();
+  } catch (err) {
+    els['storage-current'].textContent = '读取失败';
+    els['storage-download'].textContent = '读取失败';
+    showToast(String(err));
+  }
+}
+
+/** 元数据目录本次要落盘的目标：恢复默认优先，其次用户新选；都没改返回 `null`。 */
+function storageMetaTarget(info) {
+  if (storageRestore) return info.defaultDir;
+  return storagePicked;
+}
+
+/** 视频下载目录本次要落盘的目标。 */
+function storageDownloadTarget(info) {
+  if (storageDownloadRestore) return info.defaultDownloadDir;
+  return storageDownloadPicked;
+}
+
+function renderStorageSettings() {
+  const info = storageInfo;
+  if (!info) return;
+  const envMeta = info.envDir;
+  const envDownload = info.envDownloadDir;
+  const metaTarget = storageMetaTarget(info);
+  const downloadTarget = storageDownloadTarget(info);
+  const metaChanged = metaTarget && metaTarget !== info.dataDir ? metaTarget : null;
+  const downloadChanged =
+    downloadTarget && downloadTarget !== info.downloadDir ? downloadTarget : null;
+  // 本次改动优先；没改动时回落后端已保存但尚未生效的目录
+  const metaPending = metaChanged || info.pendingDir || null;
+  const downloadPending = downloadChanged || info.pendingDownloadDir || null;
+
+  els['storage-current'].textContent = info.dataDir;
+  els['storage-pending'].classList.toggle('hidden', !metaPending);
+  els['storage-pending-path'].textContent = metaPending || '';
+  els['storage-download'].textContent = info.downloadDir;
+  els['storage-download-pending'].classList.toggle('hidden', !downloadPending);
+  els['storage-download-pending-path'].textContent = downloadPending || '';
+
+  // 环境变量优先级最高：对应区域只读，避免「保存成功但被环境变量覆盖」
+  els['storage-env'].classList.toggle('hidden', !envMeta);
+  els['storage-env'].textContent = envMeta
+    ? `当前由环境变量 CINEMA_DATA_DIR 指定：${envMeta}。移除该变量后才能在此更改。`
+    : '';
+  els['storage-download-env'].classList.toggle('hidden', !envDownload);
+  els['storage-download-env'].textContent = envDownload
+    ? `当前由环境变量 CINEMA_DOWNLOAD_DIR 指定：${envDownload}。移除该变量后才能在此更改。`
+    : '';
+
+  els['storage-config-path'].textContent = info.configPath;
+  els['storage-pick'].disabled = !!envMeta;
+  els['storage-reset'].disabled = !!envMeta;
+  els['storage-pick-download'].disabled = !!envDownload;
+  els['storage-reset-download'].disabled = !!envDownload;
+  els['storage-save'].disabled = !metaChanged && !downloadChanged;
+}
+
+async function pickStorageDir() {
+  const path = await pickFolder('选择元数据存储位置');
+  if (!path) return;
+  storagePicked = path;
+  storageRestore = false;
+  renderStorageSettings();
+}
+
+function restoreStorageDefault() {
+  storagePicked = null;
+  storageRestore = true;
+  renderStorageSettings();
+}
+
+async function pickStorageDownloadDir() {
+  const path = await pickFolder('选择视频下载位置');
+  if (!path) return;
+  storageDownloadPicked = path;
+  storageDownloadRestore = false;
+  renderStorageSettings();
+}
+
+function restoreStorageDownloadDefault() {
+  storageDownloadPicked = null;
+  storageDownloadRestore = true;
+  renderStorageSettings();
+}
+
+async function saveStorageSettings() {
+  const info = storageInfo;
+  if (!info) return;
+  const metaTarget = storageMetaTarget(info);
+  const downloadTarget = storageDownloadTarget(info);
+  const metaChanged = metaTarget && metaTarget !== info.dataDir ? metaTarget : null;
+  const downloadChanged =
+    downloadTarget && downloadTarget !== info.downloadDir ? downloadTarget : null;
+  if (!metaChanged && !downloadChanged) return;
+
+  const lines = [];
+  if (metaChanged) {
+    lines.push(
+      `元数据目录 → ${metaChanged}\n库信息（数据库、封面、截图、预告片）会在重启时自动迁移，视频文件不迁移。`,
+    );
+  }
+  if (downloadChanged) {
+    lines.push(`视频下载目录 → ${downloadChanged}\n新播放 / 下载的视频落到这里，已有视频留在原处。`);
+  }
+  const ok = await confirmDialog('保存存储位置', `${lines.join('\n\n')}\n\n保存后应用会重启。`);
+  if (!ok) return;
+
+  els['storage-save'].disabled = true;
+  try {
+    storageInfo = await invoke('save_storage_settings', {
+      metadataDir: metaChanged,
+      downloadDir: downloadChanged,
+    });
+    storagePicked = null;
+    storageRestore = false;
+    storageDownloadPicked = null;
+    storageDownloadRestore = false;
+    renderStorageSettings();
+    showToast('存储位置已保存，正在重启…');
+    setTimeout(() => {
+      invoke('restart_app').catch(() => {});
+    }, 600);
+  } catch (err) {
+    els['storage-save'].disabled = false;
+    showToast(String(err));
+  }
 }
 
 /** 重扫一个源：扫描完成后刷新库与当前管理清单。 */
@@ -2445,6 +3145,7 @@ async function importLibrary() {
 
 // 联网导入（M7）：粘贴列表页 URL → 后端用 yt-dlp 枚举条目并缓存封面。
 // 支持多行：逐条提交，每条各自登记一个在线站点源；失败只提示该条，不影响其它条。
+// 页码留空 = 只导入地址这一页；填写范围则让后端自动翻页，同一搜索页只登记一个源。
 function openOnlineModal() {
   els['online-modal'].classList.remove('hidden');
   els['online-result'].textContent = '';
@@ -2453,6 +3154,12 @@ function openOnlineModal() {
 
 function hideOnlineModal() {
   els['online-modal'].classList.add('hidden');
+}
+
+function readPageInput(id) {
+  const raw = els[id].value.trim();
+  if (!raw) return null;
+  return /^\d+$/.test(raw) ? Number(raw) : NaN;
 }
 
 async function onlineImport() {
@@ -2464,19 +3171,32 @@ async function onlineImport() {
     showToast('请粘贴列表页地址（每行一个）');
     return;
   }
+  const startPage = readPageInput('online-start-page');
+  const endPage = readPageInput('online-end-page');
+  if (Number.isNaN(startPage) || Number.isNaN(endPage)) {
+    showToast('页码范围必须是正整数，或留空');
+    return;
+  }
   els['online-import'].disabled = true;
   els['online-result'].textContent = '正在导入，请稍候…';
   let discovered = 0;
   let stored = 0;
+  let pages = 0;
   let failed = 0;
+  const failedPages = [];
   try {
     for (const url of urls) {
       try {
-        const report = await invoke('online_import', { url });
+        const report = await invoke('online_import', { url, startPage, endPage });
         discovered += report.discovered;
         stored += report.stored;
+        pages += report.pages;
+        failedPages.push(...report.failedPages);
+        const failedNote = report.failedPages.length
+          ? `，第 ${report.failedPages.join('、')} 页失败`
+          : '';
         els['online-result'].textContent =
-          `${report.sourceName}：发现 ${report.discovered} 条，入库 ${report.stored} 条`;
+          `${report.sourceName}：${report.pages} 页，发现 ${report.discovered} 条，入库 ${report.stored} 条${failedNote}`;
       } catch (err) {
         failed += 1;
         els['online-result'].textContent = `${url} 导入失败：${err}`;
@@ -2487,8 +3207,12 @@ async function onlineImport() {
     await refresh();
     await reloadFilters();
     if (!failed) {
+      const pageNote = pages > 1 ? `（共 ${pages} 页）` : '';
+      const failNote = failedPages.length
+        ? `；第 ${failedPages.join('、')} 页未导入成功`
+        : '';
       hideOnlineModal();
-      showToast(`联网导入完成：发现 ${discovered} 条，入库 ${stored} 条`);
+      showToast(`联网导入完成${pageNote}：发现 ${discovered} 条，入库 ${stored} 条${failNote}；字段、评论与截图正在后台补齐`);
     }
   } finally {
     els['online-import'].disabled = false;
@@ -5410,6 +6134,43 @@ async function bindNativeEvents() {
       reloadFilters();
     }
   });
+  // 联网导入后的详情补齐：字段 / 评论 / 截图陆续入库，整批结束时刷新一次界面
+  await listen('online-meta-done', (event) => {
+    const p = event.payload || {};
+    coverCache.clear();
+    refresh();
+    reloadFilters();
+    showToast(`字段与评论补齐完成：成功 ${p.done ?? 0} 条${p.failed ? `，失败 ${p.failed} 条` : ''}`);
+  });
+  // 联网视频下载：逐条进度事件 + 整批完成提示 + 启动时拉一次已有任务
+  await listen('online-download-progress', (event) => {
+    applyDownloadView(event && event.payload ? event.payload : null);
+  });
+  await listen('online-download-done', (event) => {
+    const p = event.payload || {};
+    showToast(`视频下载完成：${p.count ?? 0} 条`);
+  });
+  try {
+    const views = await invoke('online_download_status');
+    if (Array.isArray(views) && views.length) {
+      for (const view of views) downloads.set(view.itemId, view);
+      // 只有还在下载的任务才自动展开面板，一屏「已完成」不必挡视线
+      if (views.some((view) => view.state === 'running')) {
+        els['download-panel'].classList.remove('hidden');
+      }
+      renderDownloadPanel();
+    }
+  } catch (err) {
+    /* 拉不到任务表时不影响后续事件更新 */
+  }
+  // 原生画面窗口截获的方向键：焦点落在画面上时页面收不到 keydown，由后端转发虚拟键码
+  const VK_TO_KEY = { 0x25: 'ArrowLeft', 0x26: 'ArrowUp', 0x27: 'ArrowRight', 0x28: 'ArrowDown' };
+  await listen('player-key', (event) => {
+    const key = VK_TO_KEY[Number(event && event.payload)];
+    if (key) {
+      handlePlayerKey(key, null);
+    }
+  });
   // 画面窗口截获的点击：预览 → 打开详情（与直接点海报一致）；正式播放 → 切换暂停
   await listen('preview-click', () => {
     const id = previewItemId;
@@ -5474,6 +6235,19 @@ async function init() {
       hideManageModal();
     }
   });
+  // 存储位置：数据库（源与条目字段）、封面缓存与在线缓存的落盘目录
+  els['storage-btn'].addEventListener('click', openStorageModal);
+  els['storage-pick'].addEventListener('click', pickStorageDir);
+  els['storage-reset'].addEventListener('click', restoreStorageDefault);
+  els['storage-pick-download'].addEventListener('click', pickStorageDownloadDir);
+  els['storage-reset-download'].addEventListener('click', restoreStorageDownloadDefault);
+  els['storage-save'].addEventListener('click', saveStorageSettings);
+  els['storage-cancel'].addEventListener('click', hideStorageModal);
+  els['storage-modal'].addEventListener('click', (event) => {
+    if (event.target === els['storage-modal']) {
+      hideStorageModal();
+    }
+  });
   // 元数据数据源：站点地址 + 登录 Cookie；保存即验证
   els['meta-btn'].addEventListener('click', openMetaModal);
   els['meta-save'].addEventListener('click', saveMetaSettings);
@@ -5487,6 +6261,19 @@ async function init() {
   els['detail-play'].addEventListener('click', playFromDetail);
   els['detail-trailer'].addEventListener('click', playDetailTrailer);
   els['detail-refresh'].addEventListener('click', scrapeCurrentItem);
+  els['detail-enrich'].addEventListener('click', enrichCurrentItem);
+  els['detail-download'].addEventListener('click', downloadCurrentItem);
+  // 下载任务面板：－ 折叠成标题栏（下载继续），× 关掉面板（下载仍然继续）
+  els['dlp-min'].addEventListener('click', () => {
+    const panel = els['download-panel'];
+    panel.classList.toggle('minimized');
+    els['dlp-min'].textContent = panel.classList.contains('minimized') ? '＋' : '－';
+    els['dlp-min'].title = panel.classList.contains('minimized') ? '展开' : '最小化';
+  });
+  els['dlp-close'].addEventListener('click', () => {
+    downloadPanelClosed = true;
+    els['download-panel'].classList.add('hidden');
+  });
   els['detail-x'].addEventListener('click', hideDetail);
   // 点击详情页以外的遮罩区域也关闭（点内容区不关）
   els['detail-modal'].addEventListener('click', (event) => {
@@ -5495,7 +6282,34 @@ async function init() {
     }
   });
   els['tag-back'].addEventListener('click', backFromTagBrowse);
-  els['lightbox'].addEventListener('click', closeLightbox);
+  // 放大层：点遮罩 / 图片关闭，点左右箭头只切换（不冒泡到关闭）
+  els['lightbox'].addEventListener('click', (event) => {
+    if (event.target.closest('.lightbox-nav')) {
+      return;
+    }
+    closeLightbox();
+  });
+  els['lightbox-prev'].addEventListener('click', () => stepLightbox(-1));
+  els['lightbox-next'].addEventListener('click', () => stepLightbox(1));
+  // 放大层打开时接管 ← → 与 Esc：避免被播放器 / 主机模式的方向键处理抢走
+  window.addEventListener(
+    'keydown',
+    (event) => {
+      if (els['lightbox'].classList.contains('hidden')) {
+        return;
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        stepLightbox(event.key === 'ArrowLeft' ? -1 : 1);
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      } else if (event.key === 'Escape') {
+        closeLightbox();
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    },
+    { capture: true },
+  );
   // 预告片画面窗口已设为鼠标穿透，点击落到全屏遮罩上即关闭；
   // 画面下方的进度条属于操作区，自身的点击不能冒泡触发关闭
   els['trailer-stage'].addEventListener('click', stopPreview);
@@ -5581,13 +6395,11 @@ async function init() {
     if (event.target.closest('#player-settings') || event.target.closest('#pb-settings')) return;
     closePlayerSettings();
   });
-  // 播放中按右方向键快进（经典 / 主机模式播放页通用），左键保持系统默认
+  // 播放中的方向键：→ 快进 / ← 快退 / ↑↓ 音量（经典 / 主机模式播放页通用）
   document.addEventListener('keydown', (event) => {
-    if (event.key !== 'ArrowRight' || !playingId || inMulti) return;
-    if (isTypingTarget(event.target) || modalOpen()) return;
-    event.preventDefault();
-    revealPlayerBar();
-    forwardBy(forwardSeconds);
+    if (handlePlayerKey(event.key, event.target)) {
+      event.preventDefault();
+    }
   });
   // 鼠标在页面层移动：唤醒自动隐藏的控制条（原生画面上的移动由后端转发）
   let lastRevealAt = 0;

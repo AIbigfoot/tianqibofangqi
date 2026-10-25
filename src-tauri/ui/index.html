@@ -17,6 +17,7 @@
         <button id="data-btn" class="btn" title="导出 / 导入库（迁移到其它机器）">数据迁移</button>
         <button id="online-btn" class="btn" title="粘贴列表页 URL，联网导入在线视频与封面">联网导入</button>
         <button id="manage-btn" class="btn" title="管理媒体源：扫描、合并目录、添加视频与清除（不删除硬盘文件）">库管理</button>
+        <button id="storage-btn" class="btn" title="配置库信息（元数据）与视频下载的存储位置">存储</button>
         <button id="meta-btn" class="btn" title="配置元数据数据源（站点地址与 Cookie），并按需补齐元数据">元数据</button>
       </div>
       <button id="console-btn" class="btn" title="主机模式：大屏 + 键盘导航（F10 切换）">主机模式</button>
@@ -180,11 +181,79 @@
           </aside>
           <section id="manage-detail" class="manage-detail" aria-live="polite"></section>
         </div>
+        <!-- 批量补齐进度：在库管理里点「补齐元数据」时直接可见 -->
+        <div id="manage-progress" class="meta-progress manage-progress hidden">
+          <div class="mp-head">
+            <span id="manage-progress-text">正在补齐元数据…</span>
+            <span id="manage-progress-pct" class="mp-pct">0%</span>
+          </div>
+          <div class="mp-bar"><div id="manage-progress-fill" class="mp-fill"></div></div>
+          <div id="manage-progress-current" class="mp-current"></div>
+        </div>
         <footer class="manage-foot">
           <span class="manage-foot-note">清除与解除合并只删库内记录，视频文件保留在原处</span>
           <div class="grow"></div>
           <button id="manage-close-2" class="btn ghost" type="button">关闭</button>
         </footer>
+      </div>
+    </div>
+
+    <!-- 存储位置：视频文件与视频信息分开存放。
+         元数据目录放数据库（源、条目字段、评论、标签）、封面、截图与预告片，切换时自动迁移；
+         视频下载目录只放联网播放 / 下载的视频文件，与元数据无关 -->
+    <div id="storage-modal" class="modal hidden">
+      <div class="modal-card storage-card">
+        <h3>存储位置</h3>
+        <p class="muted">
+          视频文件与视频信息分开存放：库信息放在元数据目录；联网播放 / 下载的视频放在下载目录。
+          更改后需要重启生效。
+        </p>
+
+        <section class="storage-sec">
+          <div class="storage-sec-head">
+            <span class="storage-sec-title">元数据目录</span>
+            <span class="storage-sec-note">数据库（源、条目字段、评论、标签）、封面、截图、预告片</span>
+          </div>
+          <div class="storage-box">
+            <div class="storage-label">本次运行使用</div>
+            <div id="storage-current" class="storage-path">—</div>
+          </div>
+          <div id="storage-pending" class="storage-pending hidden">
+            <div class="storage-label">重启后切换到（自动迁移库信息）</div>
+            <div id="storage-pending-path" class="storage-path"></div>
+          </div>
+          <div id="storage-env" class="storage-warn hidden"></div>
+          <div class="storage-actions">
+            <button id="storage-pick" class="btn">更改位置…</button>
+            <button id="storage-reset" class="btn ghost">恢复默认</button>
+          </div>
+        </section>
+
+        <section class="storage-sec">
+          <div class="storage-sec-head">
+            <span class="storage-sec-title">视频下载目录</span>
+            <span class="storage-sec-note">联网播放 / 下载的视频文件，不参与库信息迁移</span>
+          </div>
+          <div class="storage-box">
+            <div class="storage-label">本次运行使用</div>
+            <div id="storage-download" class="storage-path">—</div>
+          </div>
+          <div id="storage-download-pending" class="storage-pending hidden">
+            <div class="storage-label">重启后切换到</div>
+            <div id="storage-download-pending-path" class="storage-path"></div>
+          </div>
+          <div id="storage-download-env" class="storage-warn hidden"></div>
+          <div class="storage-actions">
+            <button id="storage-pick-download" class="btn">更改位置…</button>
+            <button id="storage-reset-download" class="btn ghost">恢复默认</button>
+          </div>
+        </section>
+
+        <p class="muted storage-config">设置文件：<span id="storage-config-path">—</span></p>
+        <div class="modal-actions">
+          <button id="storage-cancel" class="btn ghost">取消</button>
+          <button id="storage-save" class="btn primary" disabled>保存并重启</button>
+        </div>
       </div>
     </div>
 
@@ -205,6 +274,31 @@
           rows="4"
           placeholder="https://hanime1.me/search?genre=%E8%A3%8F%E7%95%AA"
         ></textarea>
+        <div class="online-pager">
+          <label class="field">
+            <span>起始页</span>
+            <input
+              id="online-start-page"
+              class="page-input"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="留空"
+            />
+          </label>
+          <label class="field">
+            <span>结束页</span>
+            <input
+              id="online-end-page"
+              class="page-input"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="留空"
+            />
+          </label>
+          <span class="online-pager-note">填页码范围会自动翻页导入；留空只导入地址这一页</span>
+        </div>
         <div id="online-result" class="online-result muted"></div>
         <div class="modal-actions">
           <button id="online-import" class="btn primary">开始导入</button>
@@ -330,6 +424,12 @@
               <button id="detail-play" class="btn primary">播放正片</button>
               <button id="detail-trailer" class="btn" disabled>播放预告片</button>
               <button id="detail-refresh" class="btn">从数据源更新</button>
+              <button id="detail-enrich" class="btn" title="用 JavLibrary / hanime.tv 补全简介、发行日期、评分与标签，只填空白字段">补全资料</button>
+              <button id="detail-download" class="btn hidden">下载视频</button>
+            </div>
+            <div id="detail-download-status" class="dl-inline hidden">
+              <div class="dl-inline-bar"><div id="detail-download-fill"></div></div>
+              <span id="detail-download-text">0%</span>
             </div>
             <div id="detail-state" class="detail-state"></div>
             <div class="detail-hint">
@@ -349,6 +449,16 @@
       </div>
     </div>
 
+    <!-- 联网下载任务：右下角常驻，显示每条的进度；没有任务时整块隐藏 -->
+    <div id="download-panel" class="download-panel hidden">
+      <div class="dlp-head">
+        <span id="dlp-title" class="dlp-title">下载任务</span>
+        <button id="dlp-min" class="dlp-x" type="button" title="最小化 / 展开">－</button>
+        <button id="dlp-close" class="dlp-x" type="button" title="关闭面板（下载继续）">×</button>
+      </div>
+      <div id="dlp-list" class="dlp-list"></div>
+    </div>
+
     <!-- 预告片舞台：全屏遮罩 + 居中 16:9 画面区 + 画面下方进度条；
          原生画面窗口只覆盖画面区，进度条留在页面层，点击遮罩或画面即关闭 -->
     <div id="trailer-stage" class="trailer-stage hidden">
@@ -360,8 +470,13 @@
       </div>
     </div>
 
-    <!-- 图片放大：封面与截图点击后全屏查看，点击任意处关闭 -->
-    <div id="lightbox" class="lightbox hidden"><img id="lightbox-img" alt="放大预览" /></div>
+    <!-- 图片放大：封面与截图点击后全屏查看；截图可左右切换，点击任意处关闭 -->
+    <div id="lightbox" class="lightbox hidden">
+      <button id="lightbox-prev" class="lightbox-nav prev hidden" type="button" title="上一张（←）" aria-label="上一张">‹</button>
+      <img id="lightbox-img" alt="放大预览" />
+      <button id="lightbox-next" class="lightbox-nav next hidden" type="button" title="下一张（→）" aria-label="下一张">›</button>
+      <div id="lightbox-count" class="lightbox-count hidden"></div>
+    </div>
 
     <!-- 主机模式（Console）：可切换的大屏 / 键盘导航界面。默认关闭（硬约束 C6）。
          播放时整层隐藏，让位后端原生画面窗口；悬停预览在多选 / 多屏 / 播放态下均不参与。

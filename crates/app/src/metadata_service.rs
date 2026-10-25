@@ -19,7 +19,9 @@ use cinema_domain::model::{
 };
 use cinema_domain::ports::javdb::{JavdbClient, JavdbConfig, RemoteDetail, TrailerKind};
 use cinema_domain::rules::{FieldLock, LockedField};
-use cinema_domain::tagging::{DIM_ACTOR, DIM_CATEGORY, DIM_DIRECTOR, DIM_MAKER, DIM_SERIES};
+use cinema_domain::tagging::{
+    year_label_from, DIM_ACTOR, DIM_CATEGORY, DIM_DIRECTOR, DIM_MAKER, DIM_SERIES, DIM_YEAR,
+};
 
 /// 落库与文件能力（由组合根实现）。
 pub trait MetadataStore: Send + Sync {
@@ -165,6 +167,15 @@ impl<'a> MetadataService<'a> {
         if detail.release_date.is_some() {
             item.release_date = detail.release_date.clone();
         }
+        // 年份字段与发行日期保持同步，供标签与检索使用（日期优先解析前四位）。
+        if item.release_date.is_some() {
+            item.year = item
+                .release_date
+                .as_deref()
+                .and_then(|date| date.trim().get(0..4))
+                .and_then(|prefix| prefix.parse::<i32>().ok())
+                .or(item.year);
+        }
         if detail.duration_ms.is_some() {
             item.duration_ms = detail.duration_ms;
         }
@@ -237,12 +248,17 @@ impl<'a> MetadataService<'a> {
         self.store.replace_comments(id, &detail.comments)?;
 
         if !lock.is_locked(LockedField::Tags) {
-            let groups: [(&str, Vec<String>); 5] = [
+            let year_values: Vec<String> =
+                year_label_from(item.release_date.as_deref(), item.year)
+                    .into_iter()
+                    .collect();
+            let groups: [(&str, Vec<String>); 6] = [
                 (DIM_CATEGORY, detail.categories.clone()),
                 (DIM_SERIES, detail.series.clone().into_iter().collect()),
                 (DIM_MAKER, detail.maker.clone().into_iter().collect()),
                 (DIM_DIRECTOR, detail.director.clone().into_iter().collect()),
                 (DIM_ACTOR, detail.actors.clone()),
+                (DIM_YEAR, year_values),
             ];
             for (dimension, values) in groups {
                 self.store.replace_metadata_tags(id, dimension, &values)?;

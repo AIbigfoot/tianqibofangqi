@@ -81,6 +81,12 @@ impl MpvPlayerCore {
         let inst = Arc::new(MpvInstance::new(lib)?);
         apply_common_options(&inst, render)?;
         inst.initialize()?;
+        // 运行时再兜底一次：`config=no` 可能让 `input-conf` 不生效，而 mpv 自带的
+        // UP/DOWN 是 seek ±60 秒 —— 正是「上下键变成快进快退」的来源。这里把方向键
+        // 直接绑成空操作，键盘统一交给前端处理。
+        for key in ["LEFT", "RIGHT", "UP", "DOWN"] {
+            let _ = inst.command(&["keybind", key, "ignore"]);
+        }
         observe_playback_properties(&inst)?;
         Ok(Self {
             inst,
@@ -195,6 +201,21 @@ impl MpvPlayerCore {
             .get_double("duration")
             .filter(|s| s.is_finite() && *s > 0.0)
             .map(|s| (s * 1000.0).round() as i64)
+    }
+
+    /// 当前音量（0–100）；音量属性不可读时返回 `None`。
+    pub fn volume(&self) -> Option<f64> {
+        self.inst.get_double("volume")
+    }
+
+    /// 在画面上短暂显示一行提示。
+    ///
+    /// 用 mpv 自带的 OSD 而不是页面层：原生画面窗口压在 WebView 之上，
+    /// HTML 的任何提示都会被影片画面盖住。
+    pub fn show_osd(&self, text: &str, duration_ms: i64) {
+        let _ = self
+            .inst
+            .command(&["show-text", text, &duration_ms.to_string()]);
     }
 
     /// 是否已播到结尾（mpv `eof-reached`）。
