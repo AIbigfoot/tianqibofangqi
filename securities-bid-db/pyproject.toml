@@ -1,0 +1,40 @@
+[project]
+name = "securities-bid-db"
+version = "0.1.0"
+description = "证券公司公开招标信息特色数据库 - 多源采集、清洗去重、多维打标、结构化入库、增量更新、检索与分析"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "scrapy>=2.11.0",
+    "playwright>=1.40.0",
+    "requests>=2.31.0",
+    "SQLAlchemy>=2.0.23",
+    "psycopg2-binary>=2.9.9",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "PyYAML>=6.0.1",
+    "fastapi>=0.104.1",
+    "uvicorn[standard]>=0.24.0",
+    "APScheduler>=3.10.4",
+    "python-dotenv>=1.0.0",
+    "openpyxl>=3.1.2",
+    "simhash>=2.1.2",
+    "python-dateutil>=2.8.2",
+    "lxml>=4.9.3",
+    "parsel>=1.8.1",
+    "jieba>=0.42.1",
+    "httpx>=0.25.1",
+    "tenacity>=8.2.3",
+    "loguru>=0.7.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4.3", "pytest-asyncio>=0.23.2"]
+
+[tool.setuptools.packages.find]
+include = ["spiders*", "parsers*", "pipelines*", "tagging*", "db*", "api*", "scheduler*", "sources*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]

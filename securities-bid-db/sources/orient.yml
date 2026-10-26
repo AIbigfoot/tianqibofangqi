@@ -1,0 +1,35 @@
+name: 东方证券
+key: orient
+type: dynamic
+entry_url: https://www.dfzq.com.cn/about/bidding/
+domain: www.dfzq.com.cn
+list_pagination:
+  rule: query_param
+  page_param: pageNo
+  start_page: 1
+  max_pages: 50
+  page_size: 20
+list_selectors:
+  item: ul.article-list li, div.list-item
+  title: a::text
+  link: a::attr(href)
+  publish_time: span.date::text, time::text
+detail_selectors:
+  title: h1.title::text, div.article-title::text
+  project_no: p:contains('项目编号')::text, td:contains('项目编号') + td::text
+  publish_time: span.publish-time::text, div.info time::text
+  budget: p:contains('预算')::text, td:contains('预算') + td::text
+  procurement_unit: p:contains('采购人')::text, td:contains('采购人') + td::text
+  agency: p:contains('代理机构')::text, td:contains('代理') + td::text
+  content: div.article-content, div.content
+  attachments: div.article-content a::attr(href)
+  contact: p:contains('联系人')::text
+  phone: p:contains('电话')::text
+anti_crawl:
+  rate_limit_seconds: 3
+  ua_rotation: true
+  strategy: requests_headers
+  notes: 静态 HTML，无明显反爬，控制频率即可
+compliance:
+  robots: 遵守 robots.txt，仅抓取公开公告栏目
+  notes: 仅采集无需登录的公开招标/采购公告，不采集个人信息

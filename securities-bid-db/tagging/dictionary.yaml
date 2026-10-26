@@ -1,0 +1,321 @@
+# 业务模块标签词典（一级 18 类 + 二级子类 + 关键词）
+# 打标时按一级→二级关键词命中，命中即打标
+
+business_modules:
+  - id: IT_INFRA
+    name: IT基础设施与云
+    children:
+      - id: SERVER
+        name: 服务器
+        keywords: [服务器, 刀片服务器, 机架服务器, GPU服务器, x86服务器, 信创服务器]
+      - id: STORAGE
+        name: 存储
+        keywords: [存储, 磁盘阵列, SAN, NAS, 分布式存储, 全闪存]
+      - id: NETWORK
+        name: 网络设备
+        keywords: [交换机, 路由器, 防火墙, 负载均衡, F5, 网络设备]
+      - id: CLOUD
+        name: 云资源
+        keywords: [云计算, 云资源, 云主机, 对象存储, CDN, 私有云, 混合云, 容器云, K8s, 云平台]
+      - id: MAINTENANCE
+        name: 维保
+        keywords: [维保, 运维服务, 技术支持服务, 原厂服务, 续保]
+
+  - id: XINCHUANG
+    name: 信创与国产化
+    children:
+      - id: XINCHUANG_SERVER
+        name: 信创服务器
+        keywords: [鲲鹏, 飞腾, 海光, 信创服务器, 国产化服务器]
+      - id: XINCHUANG_OS
+        name: 国产操作系统
+        keywords: [麒麟, 统信, UOS, 国产操作系统, 欧拉, openEuler]
+      - id: XINCHUANG_DB
+        name: 国产数据库
+        keywords: [达梦, 人大金仓, OceanBase, GaussDB, 国产数据库]
+      - id: XINCHUANG_MIDDLEWARE
+        name: 国产中间件
+        keywords: [东方通, 宝兰德, 金蝶天燕, 国产中间件, TongWeb]
+
+  - id: SECURITY
+    name: 网络安全
+    children:
+      - id: EQUAL_PROTECTION
+        name: 等保
+        keywords: [等保, 等级保护, 网络安全等级保护, 等保测评]
+      - id: SECURITY_DEVICE
+        name: 安全设备
+        keywords: [防火墙, WAF, 入侵检测, IDS, IPS, 抗DDoS, 堡垒机]
+      - id: SECURITY_SERVICE
+        name: 安全服务
+        keywords: [渗透测试, 漏洞扫描, 安全咨询, 应急响应, 安全运营, SOC]
+      - id: DATA_SECURITY
+        name: 数据安全
+        keywords: [数据安全, 数据脱敏, 数据库审计, 加密, 零信任]
+
+  - id: DATA
+    name: 数据与大数据
+    children:
+      - id: DATA_PLATFORM
+        name: 数据平台
+        keywords: [数据中台, 大数据平台, 数据仓库, 湖仓, 数据治理]
+      - id: DATA_TOOL
+        name: 数据工具
+        keywords: [ETL, 数据集成, 数据同步, BI, 报表工具]
+      - id: DATA_SERVICE
+        name: 数据服务
+        keywords: [数据采购, 数据源, 行情数据, 资讯数据]
+
+  - id: AI
+    name: 人工智能与算法
+    children:
+      - id: AI_PLATFORM
+        name: AI平台
+        keywords: [人工智能, AI平台, 机器学习, 深度学习, MLOps, 大模型]
+      - id: AI_APPLICATION
+        name: AI应用
+        keywords: [智能投顾, 智能客服, OCR, NLP, 人脸识别, 智能风控]
+      - id: GPU
+        name: GPU算力
+        keywords: [GPU, 算力, 显卡, 推理服务器, 训练集群]
+
+  - id: TRADING
+    name: 行情与交易系统
+    children:
+      - id: QUOTATION
+        name: 行情系统
+        keywords: [行情, 行情系统, Level-2, 行情网关]
+      - id: TRADING_SYSTEM
+        name: 交易系统
+        keywords: [交易系统, 集中交易, O32, 恒生, 金证, 交易柜台]
+      - id: FIX
+        name: 交易接口
+        keywords: [FIX, 交易接口, 极速交易, 算法交易]
+
+  - id: CORE
+    name: 核心业务系统
+    children:
+      - id: CORE_TRADING
+        name: 核心交易
+        keywords: [核心交易系统, 集中交易系统, 账户系统]
+      - id: CORE_SETTLE
+        name: 清算结算
+        keywords: [清算, 结算, 估值, 核算系统]
+      - id: CORE_BUSINESS
+        name: 业务系统
+        keywords: [经纪业务, 资管系统, 投行系统, 信用业务, 两融]
+
+  - id: OFFICE
+    name: 办公与协同
+    children:
+      - id: OA
+        name: OA办公
+        keywords: [OA, 办公自动化, 协同办公, 钉钉, 企业微信]
+      - id: OFFICE_EQUIPMENT
+        name: 办公设备
+        keywords: [办公电脑, 笔记本, 打印机, 投影仪, 办公设备]
+      - id: VIDEO
+        name: 视频会议
+        keywords: [视频会议, 会议室, 远程会议]
+
+  - id: FINANCE_HR
+    name: 财务与人力
+    children:
+      - id: FINANCE
+        name: 财务系统
+        keywords: [财务系统, 报账系统, 费控, 税务]
+      - id: HR
+        name: 人力系统
+        keywords: [HR系统, 人力资源, eHR, 招聘系统, 绩效系统]
+
+  - id: RESEARCH
+    name: 研究与资讯
+    children:
+      - id: RESEARCH_TOOL
+        name: 研究工具
+        keywords: [研究平台, 投研系统, 金融终端, Wind, 资讯终端]
+      - id: DATA_SUBSCRIBE
+        name: 数据订阅
+        keywords: [数据订阅, 资讯订阅, 研报]
+
+  - id: MARKETING
+    name: 营销与客服
+    children:
+      - id: CRM
+        name: CRM
+        keywords: [CRM, 客户关系, 营销系统, 财富管理]
+      - id: CALL_CENTER
+        name: 客服中心
+        keywords: [客服, 呼叫中心, 在线客服, 955XX]
+      - id: APP
+        name: 客户端
+        keywords: [APP, 手机证券, 网上交易, 客户端]
+
+  - id: RISK
+    name: 风控与合规
+    children:
+      - id: RISK_SYSTEM
+        name: 风控系统
+        keywords: [风控, 风险管理, 反洗钱, 全面风险]
+      - id: COMPLIANCE
+        name: 合规系统
+        keywords: [合规, 合规检查, 适当性, 投资者适当性]
+
+  - id: OUTSOURCING
+    name: 运维外包与人力外包
+    children:
+      - id: IT_OUTSOURCE
+        name: IT运维外包
+        keywords: [运维外包, IT外包, 驻场, 人力外包, 开发外包]
+      - id: OPERATION
+        name: 运营外包
+        keywords: [运营外包, 业务外包, 服务外包]
+
+  - id: ROOM
+    name: 机房与弱电工程
+    children:
+      - id: IDC
+        name: 机房建设
+        keywords: [机房, IDC, 数据中心, 机房建设]
+      - id: CABLING
+        name: 弱电工程
+        keywords: [弱电, 综合布线, 安防监控, 门禁]
+      - id: POWER
+        name: 供配电
+        keywords: [UPS, 供配电, 精密空调, 柴油发电机]
+
+  - id: DECORATION
+    name: 办公装修与物业
+    children:
+      - id: DECORATION
+        name: 办公装修
+        keywords: [装修, 装饰, 办公装修, 改造]
+      - id: PROPERTY
+        name: 物业服务
+        keywords: [物业, 保洁, 绿化, 后勤]
+
+  - id: SECURITY_GUARD
+    name: 安保与后勤
+    children:
+      - id: GUARD
+        name: 安保
+        keywords: [保安, 安保, 安防]
+      - id: LOGISTICS
+        name: 后勤
+        keywords: [食堂, 餐饮, 班车, 后勤]
+
+  - id: EQUIPMENT
+    name: 设备与耗材
+    children:
+      - id: IT_EQUIPMENT
+        name: IT设备
+        keywords: [电脑, 台式机, 显示器, 外设]
+      - id: CONSUMABLE
+        name: 耗材
+        keywords: [耗材, 硒鼓, 纸张, 文具]
+
+  - id: CONSULTING
+    name: 咨询与审计
+    children:
+      - id: IT_CONSULTING
+        name: IT咨询
+        keywords: [IT咨询, 架构咨询, 规划咨询]
+      - id: AUDIT
+        name: 审计
+        keywords: [审计, 内审, 外部审计, 会计师事务所]
+      - id: LEGAL
+        name: 法律服务
+        keywords: [法律服务, 律师, 法律顾问]
+
+  - id: OTHER
+    name: 其他
+    children:
+      - id: OTHER
+        name: 其他
+        keywords: []
+
+# 采购方式
+procurement_methods:
+  - 公开招标
+  - 邀请招标
+  - 竞争性磋商
+  - 竞争性谈判
+  - 询价
+  - 单一来源
+  - 框架协议
+  - 竞价
+  - 比选
+  - 其他
+
+# 公告类型
+notice_types:
+  - 招标公告
+  - 变更公告
+  - 中标候选人
+  - 中标结果
+  - 废标流标
+  - 供应商征集
+  - 资格预审
+  - 其他
+
+# 组织形式
+org_forms:
+  - 自行招标
+  - 委托代理
+
+# 项目属性
+project_attributes:
+  - 新建
+  - 扩容
+  - 续保
+  - 替换
+  - 试点
+  - 研究课题
+  - 其他
+
+# 供应商类型倾向
+supplier_types:
+  - 国产化要求
+  - 原厂授权
+  - 集成商
+  - 代理商
+  - 不限
+
+# 金额分档（单位：元）
+amount_tiers:
+  - id: TIER_LT_50W
+    name: "<50万"
+    min: 0
+    max: 500000
+  - id: TIER_50_100W
+    name: "50-100万"
+    min: 500000
+    max: 1000000
+  - id: TIER_100_300W
+    name: "100-300万"
+    min: 1000000
+    max: 3000000
+  - id: TIER_300_500W
+    name: "300-500万"
+    min: 3000000
+    max: 5000000
+  - id: TIER_500_1000W
+    name: "500-1000万"
+    min: 5000000
+    max: 10000000
+  - id: TIER_1000_3000W
+    name: "1000-3000万"
+    min: 10000000
+    max: 30000000
+  - id: TIER_3000W_1Y
+    name: "3000万-1亿"
+    min: 30000000
+    max: 100000000
+  - id: TIER_GT_1Y
+    name: ">1亿"
+    min: 100000000
+    max: null
+  - id: TIER_UNKNOWN
+    name: "未披露"
+    min: null
+    max: null
